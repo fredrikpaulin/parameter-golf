@@ -1,0 +1,9 @@
+{
+  "name": "LeakyReLU² + Legal TTT + Parallel Muon + zstd-22",
+  "val_bpb": null,
+  "bytes_total": null,
+  "blurb": "Fork of SOTA (1.1194): zstd-22 compression (saves ~400KB vs LZMA), BigramHash 3072 (ablated at -0.0009 BPB). Built on PR #414 + PR #399 + PR #461 + PR #493/#518.",
+  "author": "fredrikpaulin",
+  "github_id": "fredrikpaulin",
+  "date": "2026-03-30"
+}
