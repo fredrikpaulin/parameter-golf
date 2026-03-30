@@ -1,0 +1,20 @@
+commit	val_bpb	status	description
+baseline	3.4882	ok	6L/384d 9.8M params, LR=0.01, batch=4096, 1555 steps, 120s
+run2	3.6161	worse	6L/384d 9.8M, LR=1e-3, batch=16384, 308 steps — too few updates
+run3	3.5462	worse	8L/512d 22.3M, LR=1e-3, batch=8192, 420 steps — capacity not the bottleneck
+run4	3.4852	same	6L/384d, LR=1e-3, batch=4096, skip zeroed at mask — skip fix marginal
+mar31-diff-01	3.4809	same	6L/384d, LR=3e-3, batch=4096, 1787 steps — marginal from higher LR
+mar31-diff-02	3.4767	same	sinusoidal time embedding (MLP), 10.1M params — tiny improvement
+mar31-diff-03	3.4785	same	weight tying (embed=out_head), 9.7M params — no change
+mar31-diff-04	3.4837	worse	AdaLN-Zero per-layer conditioning, 15.1M params — too many params, no gain
+mar31-diff-05	3.4822	same	256 ELBO eval steps (was 64) — bound already tight, no change
+mar31-diff-06	3.4822	same	log-linear noise schedule (SEDD-style) — identical to cosine
+mar31-diff-07	3.4899	worse	LR=0.01 (too high, converges slower), sinusoidal embed
+mar31-diff-08	3.4712	better	Muon optimizer (LR=0.02), sinusoidal embed — NEW BEST
+mar31-diff-09	3.4855	worse	Muon LR=0.04 too aggressive
+mar31-diff-10	3.4795	same	600s training (AdamW LR=3e-3) — 8882 steps, loss 5.94, no BPB improvement
+mar31-diff-11	3.4717	same	Muon + aux loss on all positions — worse training
+mar31-diff-12	3.4681	better	Muon, NO time embedding — NEW BEST, still no context use
+mar31-diff-13	3.4489	better	Fixed 15% masking, no time embed, Muon — NEW BEST
+mar31-diff-14	3.4470	better	Fixed 50% masking — slightly better than 15%, ELBO-weighted sweet spot
+mar31-diff-15	2.4216	BREAKTHROUGH	RoPE + fixed 50% mask + Muon + no time embed — model uses context!
