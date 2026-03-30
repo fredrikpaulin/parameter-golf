@@ -335,7 +335,7 @@ class DiffusionLM(nn.Module):
 def diffusion_loss(model, tokens):
     B, T = tokens.shape
 
-    # Fixed masking rate — avoids attention collapse from variable-t training
+    # Fixed 50% masking — best for ELBO-weighted evaluation with RoPE
     t_val = 0.5
     mask_prob = 0.50
 

@@ -18,3 +18,5 @@ mar31-diff-12	3.4681	better	Muon, NO time embedding — NEW BEST, still no conte
 mar31-diff-13	3.4489	better	Fixed 15% masking, no time embed, Muon — NEW BEST
 mar31-diff-14	3.4470	better	Fixed 50% masking — slightly better than 15%, ELBO-weighted sweet spot
 mar31-diff-15	2.4216	BREAKTHROUGH	RoPE + fixed 50% mask + Muon + no time embed — model uses context!
+mar31-diff-16	2.7568	worse	Variable-t + RoPE — model diluted by all-t training, fixed masking better
+mar31-diff-17	2.2885	better	300s training, fixed 50%, RoPE, Muon — still improving!
