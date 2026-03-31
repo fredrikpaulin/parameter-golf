@@ -23,3 +23,9 @@ mar31-diff-17	2.2885	better	300s training, fixed 50%, RoPE, Muon — still impro
 mar31-diff-18	2.3464	worse	Curriculum (fixed 50%→variable-t) at 70% — switch destabilized
 mar31-diff-19	2.3296	worse	Fixed 30% masking, 300s — worse transfer to mid-t ELBO
 mar31-diff-20	2.2129	better	600s training, fixed 50%, 6207 steps, loss 3.60 — NEW BEST
+mar31-diff-21	2.3067	worse	4L/512d (11.5M), 300s — wider but shallower, depth > width
+mar31-diff-22	2.3338	worse	8L/384d (12.6M), 300s — too deep, too slow, fewer steps
+mar31-diff-23	2.3473	worse	weight tying, 300s — hurts performance
+mar31-diff-24	2.3440	worse	seq_len=1024, 300s — slower, fewer steps
+mar31-diff-25	2.3096	worse	narrow-band 30-70% masking, 300s — marginal diversity
+mar31-diff-26	3.6076	broken	self-conditioning at eval only — model not trained for it
