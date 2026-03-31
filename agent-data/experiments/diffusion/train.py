@@ -296,7 +296,7 @@ class DiffusionBlock(nn.Module):
     def __call__(self, x, rope_cos, rope_sin):
         x = x + self.attn(rms_norm(x), rope_cos, rope_sin)
         h = self.fc(rms_norm(x))
-        h = mx.maximum(h, 0) ** 2  # relu²
+        h = nn.gelu(h)
         x = x + self.proj(h)
         return x
 

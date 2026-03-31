@@ -59,3 +59,6 @@ mlp4x-120s	2.4824	worse	MLP 4x (11.4M), 120s — extra width doesn't compensate 
 no-softcap-120s	2.4549	same	Remove logit softcap, 120s — tied with baseline but per-t CEs worse, risky for long runs
 higher-lr-120s	2.5023	worse	Muon LR 0.02→0.03, 120s — too aggressive even with QK-norm
 narrow-t-05-3600s	1.9168	BEST	t range [0.1-0.5] 8 strata, 3600s, 35018 steps — focuses training on productive regime, NEW ALL-TIME BEST
+narrow-t-04-3600s	1.9524	worse	t range [0.1-0.4] 6 strata, 3600s — too narrow, model over-specializes, t=0.05 CE regressed
+weight-decay-3600s	1.9489	worse	Weight decay 0.01 on matrix params, 3600s — regularization fights useful learning
+gelu-3600s	1.9067	BEST	GeLU activation (was relu²), 3600s, 33752 steps — smoother gradients, lower loss plateau, NEW ALL-TIME BEST
