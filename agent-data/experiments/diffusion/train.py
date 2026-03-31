@@ -324,18 +324,16 @@ class DiffusionLM(nn.Module):
         return logits
 
 
+_CURRICULUM_PROGRESS = 0.0  # Set by training loop
+
 # ==============================================================================
 # TRAINING LOSS — Variable t, masked-only CE
-# ==============================================================================
-# No skip connection — transformer must learn both identity and denoising.
-# Loss computed ONLY at masked positions.
-# Variable t covers the full noise schedule for proper ELBO.
 # ==============================================================================
 
 def diffusion_loss(model, tokens):
     B, T = tokens.shape
 
-    # Fixed 50% masking — best for ELBO-weighted evaluation with RoPE
+    # Fixed 50% masking — matches ELBO weight peak
     t_val = 0.5
     mask_prob = 0.50
 
@@ -481,6 +479,8 @@ def main():
 
         # LR schedule with warmup + cosine warmdown
         progress = min(total_training_time / TIME_BUDGET, 1.0)
+        global _CURRICULUM_PROGRESS
+        _CURRICULUM_PROGRESS = progress
         if progress > (1.0 - WARMDOWN_FRAC):
             lr_mul = (1.0 - progress) / WARMDOWN_FRAC
         elif step < WARMUP_STEPS:

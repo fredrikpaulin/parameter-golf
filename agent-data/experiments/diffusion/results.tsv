@@ -20,3 +20,6 @@ mar31-diff-14	3.4470	better	Fixed 50% masking — slightly better than 15%, ELBO
 mar31-diff-15	2.4216	BREAKTHROUGH	RoPE + fixed 50% mask + Muon + no time embed — model uses context!
 mar31-diff-16	2.7568	worse	Variable-t + RoPE — model diluted by all-t training, fixed masking better
 mar31-diff-17	2.2885	better	300s training, fixed 50%, RoPE, Muon — still improving!
+mar31-diff-18	2.3464	worse	Curriculum (fixed 50%→variable-t) at 70% — switch destabilized
+mar31-diff-19	2.3296	worse	Fixed 30% masking, 300s — worse transfer to mid-t ELBO
+mar31-diff-20	2.2129	better	600s training, fixed 50%, 6207 steps, loss 3.60 — NEW BEST
