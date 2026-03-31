@@ -27,7 +27,7 @@ Follow the loop in `agent-data/experiments/diffusion/program.md`:
 
 ### Current Status
 
-Best BPB: **2.0758** (6L/384d, RoPE, variable-t [0.1-0.6] + ELBO weighting, stratified t sampling, Muon optimizer, 3600s training, 32296 steps)
+Best BPB: **2.0570** (6L/384d, RoPE, QK-norm, variable-t [0.1-0.6] + ELBO weighting, stratified t sampling, Muon optimizer, 3600s training, 8634 steps — throttled machine, only 27% of expected steps)
 
 **KEY BREAKTHROUGHS** (in order of impact):
 1. **RoPE** — Without positional info in attention, the model learned a global unigram prior (CE ~5.9 at ALL noise levels). With RoPE, BPB dropped 3.45 → 2.42 in a single change.
@@ -42,16 +42,17 @@ Best BPB: **2.0758** (6L/384d, RoPE, variable-t [0.1-0.6] + ELBO weighting, stra
 - Logit softcap helps stability for long training (removing it hurt 600s runs)
 - Depth recurrence (3L×2) is competitive for short runs but unique layers win with more training
 - Stratified t sampling (10 strata) smooths loss/gnorm curves, marginal BPB gain (2.0812→2.0758)
+- QK-norm (rms_norm on Q,K before attention) stabilizes training, eliminates gnorm spikes, BPB 2.0758→2.0570
 - Target: AR baseline is 1.11 BPB
 
-**Per-t diagnostics (3600s stratified best run)**:
-- t=0.05: CE=1.42
-- t=0.10: CE=1.64
-- t=0.20: CE=1.68
-- t=0.30: CE=2.05
-- t=0.50: CE=3.25
-- t=0.70: CE=4.87
-- t=0.90: CE=5.88
+**Per-t diagnostics (3600s QK-norm best run, 8634 steps throttled)**:
+- t=0.05: CE=1.36
+- t=0.10: CE=1.59
+- t=0.20: CE=1.64
+- t=0.30: CE=2.06
+- t=0.50: CE=3.42
+- t=0.70: CE=4.92
+- t=0.90: CE=5.96
 
 ### Known Issues
 
@@ -75,12 +76,16 @@ Best BPB: **2.0758** (6L/384d, RoPE, variable-t [0.1-0.6] + ELBO weighting, stra
 12. **[DONE - BEST] More training time** — 2400s→2.14, 3600s→2.08, loss still dropping
 13. **Scale model** — now that training works, try larger models with longer training
 14. **Increase seq_len to 1024** — was tried at 300s and hurt (fewer steps), revisit with longer training
+15. **[DONE - BEST] QK-norm** — rms_norm on Q,K before attention, BPB 2.0758→2.0570 (despite 3.7x fewer steps from throttling)
+16. **[DONE - hurt] Extended t range [0.05-0.6]** — low-t ELBO weights too high, hurt training
+17. **[DONE - hurt] EMA weights** — EMA lags behind rapidly improving weights at short training
 
 ### Architecture
 
 - Absorbing-state MDLM: forward process masks tokens, model denoises
 - Bidirectional transformer (no causal mask)
 - RoPE (rotary position embeddings) in attention
+- QK-norm (rms_norm on Q and K per-head before dot product)
 - t-conditioning: linear projection of scalar t added to input embeddings
 - Variable-t training with ELBO importance weighting (dalpha/mask_prob)
 - Cosine noise schedule, t sampled from [0.1, 0.6] with stratified sampling (10 strata)

@@ -48,3 +48,7 @@ tight06-3600s	2.0812	BEST	Variable-t [0.1-0.6] + relu², 3600s, 31493 steps — 
 perlayer-t-120s	2.4842	worse	Per-layer t scale+shift conditioning, 120s — hurts convergence
 stratified-t-120s	2.4668	test	Stratified t sampling (10 strata), 120s — much smoother loss/gnorm
 stratified-t-3600s	2.0758	BEST	Stratified t sampling (10 strata), 3600s, 32296 steps — NEW ALL-TIME BEST
+extend-t-005-120s	2.5052	worse	Extended t range [0.05-0.6] 11 strata, 120s — low-t ELBO weights too high, hurt training
+ema-120s	2.8962	worse	EMA weights (decay=0.999) for eval, 120s — EMA lags behind rapidly improving weights at short training
+qknorm-120s	2.4558	better	QK-norm (rms_norm on Q,K), 120s — smoother gnorm, new 120s best
+qknorm-3600s	2.0570	BEST	QK-norm (rms_norm on Q,K), 3600s, 8634 steps (throttled!) — NEW ALL-TIME BEST despite 3.7x fewer steps

@@ -276,6 +276,10 @@ class BidirectionalAttention(nn.Module):
         q = _apply_rope(q, rope_cos, rope_sin)
         k = _apply_rope(k, rope_cos, rope_sin)
 
+        # QK-norm: normalize Q and K per-head for stable, direction-only attention
+        q = rms_norm(q)
+        k = rms_norm(k)
+
         attn = (q @ k.transpose(0, 1, 3, 2)) * (1.0 / math.sqrt(hd))
         attn = mx.softmax(attn, axis=-1).astype(v.dtype)
         out = (attn @ v).transpose(0, 2, 1, 3).reshape(B, T, -1)
