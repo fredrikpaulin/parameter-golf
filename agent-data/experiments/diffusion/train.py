@@ -320,6 +320,7 @@ class DiffusionLM(nn.Module):
         h = rms_norm(h)
 
         logits = self.out_head(h)
+        logits = self.logit_softcap * mx.tanh(logits / self.logit_softcap)
         return logits
 
 

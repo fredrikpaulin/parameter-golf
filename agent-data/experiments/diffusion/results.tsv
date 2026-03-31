@@ -30,3 +30,5 @@ mar31-diff-24	2.3440	worse	seq_len=1024, 300s — slower, fewer steps
 mar31-diff-25	2.3096	worse	narrow-band 30-70% masking, 300s — marginal diversity
 mar31-diff-26	3.6076	broken	self-conditioning at eval only — model not trained for it
 mar31-diff-27	2.2844	better	Remove logit softcap, 300s — tiny improvement, new 300s best
+mar31-diff-28	2.2296	worse	600s no softcap — softcap helps stability for long training
+mar31-diff-29	2.2291	worse	16K batch, 300s — only 871 steps, fewer steps > larger batch
