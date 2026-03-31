@@ -27,7 +27,7 @@ Follow the loop in `agent-data/experiments/diffusion/program.md`:
 
 ### Current Status
 
-Best BPB: **1.9206** (6L/384d, RoPE, QK-norm, variable-t [0.1-0.6] + ELBO weighting, stratified t sampling, Muon optimizer, 3600s training, 30174 steps — BROKE 2.0 BARRIER)
+Best BPB: **1.9168** (6L/384d, RoPE, QK-norm, variable-t [0.1-0.5] + ELBO weighting, stratified t sampling (8 strata), Muon optimizer, 3600s training, 35018 steps)
 
 **KEY BREAKTHROUGHS** (in order of impact):
 1. **RoPE** — Without positional info in attention, the model learned a global unigram prior (CE ~5.9 at ALL noise levels). With RoPE, BPB dropped 3.45 → 2.42 in a single change.
@@ -48,14 +48,14 @@ Best BPB: **1.9206** (6L/384d, RoPE, QK-norm, variable-t [0.1-0.6] + ELBO weight
 - At t=0.05 the model achieves CE=0.86, which is BELOW the AR baseline of 1.11
 - Target: AR baseline is 1.11 BPB
 
-**Per-t diagnostics (3600s QK-norm full run, 30174 steps)**:
-- t=0.05: CE=0.86
-- t=0.10: CE=1.12
-- t=0.20: CE=1.38
-- t=0.30: CE=1.85
-- t=0.50: CE=3.08
-- t=0.70: CE=4.82
-- t=0.90: CE=5.88
+**Per-t diagnostics (3600s narrow-t [0.1-0.5] run, 35018 steps)**:
+- t=0.05: CE=0.77
+- t=0.10: CE=0.91
+- t=0.20: CE=1.25
+- t=0.30: CE=1.78
+- t=0.50: CE=3.22
+- t=0.70: CE=4.92
+- t=0.90: CE=5.98
 
 ### Known Issues
 
@@ -91,7 +91,7 @@ Best BPB: **1.9206** (6L/384d, RoPE, QK-norm, variable-t [0.1-0.6] + ELBO weight
 - QK-norm (rms_norm on Q and K per-head before dot product)
 - t-conditioning: linear projection of scalar t added to input embeddings
 - Variable-t training with ELBO importance weighting (dalpha/mask_prob)
-- Cosine noise schedule, t sampled from [0.1, 0.6] with stratified sampling (10 strata)
+- Cosine noise schedule, t sampled from [0.1, 0.5] with stratified sampling (8 strata)
 - Muon optimizer (Newton-Schulz for 2D matrices, Adam for embeddings/scalars)
 - Logit softcap (30.0)
 - ELBO-based BPB evaluation (64 steps)

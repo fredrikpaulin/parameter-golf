@@ -333,7 +333,8 @@ class DiffusionLM(nn.Module):
         h = rms_norm(h)
 
         logits = self.out_head(h)
-        logits = self.logit_softcap * mx.tanh(logits / self.logit_softcap)
+        if self.logit_softcap > 0:
+            logits = self.logit_softcap * mx.tanh(logits / self.logit_softcap)
         return logits
 
 
@@ -344,7 +345,7 @@ _GLOBAL_STEP = 0  # For stratified t sampling
 # TRAINING LOSS — Variable t, masked-only CE
 # ==============================================================================
 
-_N_STRATA = 10  # Divide [0.1, 0.6] into 10 strata of width 0.05
+_N_STRATA = 8  # Divide [0.1, 0.5] into 8 strata of width 0.05
 
 def diffusion_loss(model, tokens):
     B, T = tokens.shape
@@ -540,6 +541,7 @@ def main():
     print("\n--- Per-t diagnostics ---")
     val_loader.reset()
     diag_tokens = val_loader.next_batch()
+    per_t_ces = {}
     for t_diag in [0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9]:
         mp = get_mask_prob(t_diag)
         dmask = mx.random.uniform(shape=diag_tokens.shape) < mp
@@ -551,10 +553,8 @@ def main():
         dmask_f = dmask.reshape(-1).astype(mx.float32)
         mx.eval(dce, dmask_f)
         n_m = float(mx.sum(dmask_f))
-        if n_m > 0:
-            avg_ce = float(mx.sum(dce * dmask_f)) / n_m
-        else:
-            avg_ce = 0.0
+        avg_ce = float(mx.sum(dce * dmask_f)) / n_m if n_m > 0 else 0.0
+        per_t_ces[t_diag] = avg_ce
         print(f"  t={t_diag:.2f}: mask_prob={mp:.3f}, n_masked={int(n_m)}, avg_CE_masked={avg_ce:.4f}")
 
     print(f"\nELBO eval ({EVAL_ELBO_STEPS} levels x 8 batches)...")
@@ -573,6 +573,17 @@ def main():
     print(f"num_layers:       {NUM_LAYERS}")
     print(f"noise_schedule:   {NOISE_SCHEDULE}")
     print(f"elbo_steps:       {EVAL_ELBO_STEPS}")
+
+    # === COPY-PASTE SUMMARY (share this block with Claude) ===
+    print("\n" + "=" * 50)
+    print("RUN SUMMARY — copy everything below this line")
+    print("=" * 50)
+    print(f"val_bpb: {val_bpb:.6f}")
+    print(f"steps: {step} | time: {total_training_time:.0f}s | params: {num_params/1e6:.1f}M")
+    per_t_str = " | ".join(f"t{t}={ce:.2f}" for t, ce in sorted(per_t_ces.items()))
+    print(f"per-t: {per_t_str}")
+    print(f"final_smooth_loss: {debiased:.4f}")
+    print("=" * 50)
 
 
 if __name__ == "__main__":
