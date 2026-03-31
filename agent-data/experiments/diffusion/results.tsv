@@ -45,3 +45,6 @@ elbo-tight-1200s	2.1787	better	Variable-t [0.05-0.75] + ELBO weighting, 1200s, 1
 swiglu-1200s	2.1775	better	SwiGLU activation (12.3M params), 1200s — marginal, not worth extra params
 tight06-2400s	2.1430	better	Variable-t [0.1-0.6] + relu², 2400s, 20000 steps
 tight06-3600s	2.0812	BEST	Variable-t [0.1-0.6] + relu², 3600s, 31493 steps — NEW ALL-TIME BEST
+perlayer-t-120s	2.4842	worse	Per-layer t scale+shift conditioning, 120s — hurts convergence
+stratified-t-120s	2.4668	test	Stratified t sampling (10 strata), 120s — much smoother loss/gnorm
+stratified-t-3600s	2.0758	BEST	Stratified t sampling (10 strata), 3600s, 32296 steps — NEW ALL-TIME BEST

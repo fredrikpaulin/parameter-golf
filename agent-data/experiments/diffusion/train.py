@@ -334,17 +334,24 @@ class DiffusionLM(nn.Module):
 
 
 _CURRICULUM_PROGRESS = 0.0  # Set by training loop
+_GLOBAL_STEP = 0  # For stratified t sampling
 
 # ==============================================================================
 # TRAINING LOSS — Variable t, masked-only CE
 # ==============================================================================
 
+_N_STRATA = 10  # Divide [0.1, 0.6] into 10 strata of width 0.05
+
 def diffusion_loss(model, tokens):
     B, T = tokens.shape
 
-    # Sample t uniformly, with ELBO importance weighting to prevent
-    # high-t gradient domination (the key missing piece from run 16)
-    t_val = float(mx.random.uniform(low=0.1, high=0.6, shape=()))
+    # Stratified t sampling: cycle through strata for even coverage,
+    # sample uniformly within each stratum. Reduces gradient variance
+    # from ELBO weighting without any bias or extra compute.
+    stratum = _GLOBAL_STEP % _N_STRATA
+    t_lo = 0.1 + stratum * 0.05
+    t_hi = t_lo + 0.05
+    t_val = float(mx.random.uniform(low=t_lo, high=t_hi, shape=()))
     mask_prob = max(get_mask_prob(t_val), 0.01)
     dalpha = get_dalpha_dt(t_val)
 
@@ -492,8 +499,9 @@ def main():
 
         # LR schedule with warmup + cosine warmdown
         progress = min(total_training_time / TIME_BUDGET, 1.0)
-        global _CURRICULUM_PROGRESS
+        global _CURRICULUM_PROGRESS, _GLOBAL_STEP
         _CURRICULUM_PROGRESS = progress
+        _GLOBAL_STEP = step
         if progress > (1.0 - WARMDOWN_FRAC):
             lr_mul = (1.0 - progress) / WARMDOWN_FRAC
         elif step < WARMUP_STEPS:

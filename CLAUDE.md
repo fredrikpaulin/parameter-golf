@@ -27,7 +27,7 @@ Follow the loop in `agent-data/experiments/diffusion/program.md`:
 
 ### Current Status
 
-Best BPB: **2.0812** (6L/384d, RoPE, variable-t [0.1-0.6] + ELBO weighting, Muon optimizer, 3600s training, 31493 steps)
+Best BPB: **2.0758** (6L/384d, RoPE, variable-t [0.1-0.6] + ELBO weighting, stratified t sampling, Muon optimizer, 3600s training, 32296 steps)
 
 **KEY BREAKTHROUGHS** (in order of impact):
 1. **RoPE** — Without positional info in attention, the model learned a global unigram prior (CE ~5.9 at ALL noise levels). With RoPE, BPB dropped 3.45 → 2.42 in a single change.
@@ -41,21 +41,22 @@ Best BPB: **2.0812** (6L/384d, RoPE, variable-t [0.1-0.6] + ELBO weighting, Muon
 - Loss still dropping at 3600s/31K steps — more training time keeps helping
 - Logit softcap helps stability for long training (removing it hurt 600s runs)
 - Depth recurrence (3L×2) is competitive for short runs but unique layers win with more training
+- Stratified t sampling (10 strata) smooths loss/gnorm curves, marginal BPB gain (2.0812→2.0758)
 - Target: AR baseline is 1.11 BPB
 
-**Per-t diagnostics (3600s best run)**:
-- t=0.05: CE=1.12 (strong context usage)
-- t=0.10: CE=1.53
-- t=0.20: CE=1.77
-- t=0.30: CE=2.02
-- t=0.50: CE=3.45
-- t=0.70: CE=4.85
-- t=0.90: CE=5.90
+**Per-t diagnostics (3600s stratified best run)**:
+- t=0.05: CE=1.42
+- t=0.10: CE=1.64
+- t=0.20: CE=1.68
+- t=0.30: CE=2.05
+- t=0.50: CE=3.25
+- t=0.70: CE=4.87
+- t=0.90: CE=5.88
 
 ### Known Issues
 
 - MLX optimizer API: must use dict-based `optimizer.apply_gradients(grads_flat, params_flat)` then `model.update()`. The model-based call is broken.
-- Gradient norm variance from ELBO weighting — dalpha/mask_prob creates spikes near t extremes. Partially addressed by tightening t range to [0.05-0.75].
+- Gradient norm variance from ELBO weighting — dalpha/mask_prob creates spikes near t extremes. Addressed by stratified t sampling (10 strata cycling) and tightening t range to [0.1-0.6].
 - Self-conditioning was tried and failed — too expensive (double fwd cost) and model wasn't trained for it at eval time.
 
 ### Ideas to Try (Priority Order)
@@ -70,7 +71,7 @@ Best BPB: **2.0812** (6L/384d, RoPE, variable-t [0.1-0.6] + ELBO weighting, Muon
 8. **[DONE - marginal] Depth recurrence 3L×2** — competitive short runs, worse long runs
 9. **[DONE - marginal] SwiGLU activation** — marginal gain (2.1775 vs 2.1787) not worth 25% more params
 10. **[DONE - BEST] Even tighter t range [0.1-0.6]** — combined with longer training, BPB 2.18→2.08
-11. **Variance reduction** — antithetic sampling or control variates for ELBO gradient
+11. **[DONE - marginal] Variance reduction** — stratified t sampling (10 strata), smoother training, BPB 2.0812→2.0758
 12. **[DONE - BEST] More training time** — 2400s→2.14, 3600s→2.08, loss still dropping
 13. **Scale model** — now that training works, try larger models with longer training
 14. **Increase seq_len to 1024** — was tried at 300s and hurt (fewer steps), revisit with longer training
@@ -82,7 +83,7 @@ Best BPB: **2.0812** (6L/384d, RoPE, variable-t [0.1-0.6] + ELBO weighting, Muon
 - RoPE (rotary position embeddings) in attention
 - t-conditioning: linear projection of scalar t added to input embeddings
 - Variable-t training with ELBO importance weighting (dalpha/mask_prob)
-- Cosine noise schedule, t sampled from [0.1, 0.6]
+- Cosine noise schedule, t sampled from [0.1, 0.6] with stratified sampling (10 strata)
 - Muon optimizer (Newton-Schulz for 2D matrices, Adam for embeddings/scalars)
 - Logit softcap (30.0)
 - ELBO-based BPB evaluation (64 steps)
