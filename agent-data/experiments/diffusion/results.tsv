@@ -32,3 +32,16 @@ mar31-diff-26	3.6076	broken	self-conditioning at eval only — model not trained
 mar31-diff-27	2.2844	better	Remove logit softcap, 300s — tiny improvement, new 300s best
 mar31-diff-28	2.2296	worse	600s no softcap — softcap helps stability for long training
 mar31-diff-29	2.2291	worse	16K batch, 300s — only 871 steps, fewer steps > larger batch
+mar31-diff-30	2.4567	worse	self-conditioning training+eval — double fwd cost too expensive
+mar31-diff-31	3.4740	broken	AdamW (no Muon) — can't train attention, Muon essential
+mar31-diff-32	2.2709	better	3L×2 depth recurrence (5.2M), 300s — NEW 300s BEST, faster+fewer params
+mar31-diff-33	2.3438	worse	3L×3 (9 eff layers), 300s — too slow
+mar31-diff-34	2.2371	worse	3L×2 at 600s — unique layers (6L) better with more training (2.213)
+mar31-diff-35	3.4740	broken	AdamW with frozen RoPE — still can't train attention without Muon
+elbo-vt-300s	2.4170	worse	Variable-t [0.05-0.95] + ELBO weighting + t-conditioning, 300s
+elbo-vt-600s	2.2900	worse	Variable-t [0.05-0.95] + ELBO weighting, 600s — context works but high-t drags ELBO
+elbo-tight-600s	2.2801	better	Variable-t [0.05-0.75] + ELBO weighting, 600s — tighter range, new variable-t best
+elbo-tight-1200s	2.1787	better	Variable-t [0.05-0.75] + ELBO weighting, 1200s, 11409 steps
+swiglu-1200s	2.1775	better	SwiGLU activation (12.3M params), 1200s — marginal, not worth extra params
+tight06-2400s	2.1430	better	Variable-t [0.1-0.6] + relu², 2400s, 20000 steps
+tight06-3600s	2.0812	BEST	Variable-t [0.1-0.6] + relu², 3600s, 31493 steps — NEW ALL-TIME BEST

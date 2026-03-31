@@ -27,44 +27,67 @@ Follow the loop in `agent-data/experiments/diffusion/program.md`:
 
 ### Current Status
 
-Best BPB: **2.288** (6L/384d, RoPE, fixed 50% masking, Muon optimizer, 300s training)
+Best BPB: **2.0812** (6L/384d, RoPE, variable-t [0.1-0.6] + ELBO weighting, Muon optimizer, 3600s training, 31493 steps)
 
-**KEY BREAKTHROUGH**: RoPE (rotary position embeddings) was the critical missing piece. Without positional info in attention, the model couldn't learn to use context — it learned a global prior instead (CE ~5.9 at ALL noise levels). With RoPE, BPB dropped from 3.45 → 2.42 in a single change.
+**KEY BREAKTHROUGHS** (in order of impact):
+1. **RoPE** — Without positional info in attention, the model learned a global unigram prior (CE ~5.9 at ALL noise levels). With RoPE, BPB dropped 3.45 → 2.42 in a single change.
+2. **ELBO importance weighting** — Loss multiplied by `dalpha/mask_prob` downweights high-t steps where gradients are noisy. This made variable-t training work (previously caused attention collapse).
+3. **Variable-t training [0.05-0.75]** — With ELBO weighting, variable-t outperforms fixed 50% masking. Tight range avoids the near-random high-t regime.
 
 **Current findings**:
-- Fixed 50% masking >> variable-t training (the model can't handle attention at high masking rates during training)
-- Muon optimizer helps slightly over AdamW
-- No time embedding needed (mask pattern implicitly encodes noise level)
-- Loss still dropping at 300s — more training time helps
+- Muon optimizer is ESSENTIAL — AdamW cannot train attention (BPB stays 3.47)
+- t-conditioning via linear projection helps model adapt to noise level
+- No time embedding needed beyond simple linear t_embed
+- Loss still dropping at 3600s/31K steps — more training time keeps helping
+- Logit softcap helps stability for long training (removing it hurt 600s runs)
+- Depth recurrence (3L×2) is competitive for short runs but unique layers win with more training
 - Target: AR baseline is 1.11 BPB
+
+**Per-t diagnostics (3600s best run)**:
+- t=0.05: CE=1.12 (strong context usage)
+- t=0.10: CE=1.53
+- t=0.20: CE=1.77
+- t=0.30: CE=2.02
+- t=0.50: CE=3.45
+- t=0.70: CE=4.85
+- t=0.90: CE=5.90
 
 ### Known Issues
 
 - MLX optimizer API: must use dict-based `optimizer.apply_gradients(grads_flat, params_flat)` then `model.update()`. The model-based call is broken.
-- Variable-t training causes attention collapse even with RoPE — the model learns to ignore attention because high-t training is noisy
-- Fixed masking rate mismatches ELBO eval but transfers well to low-t; poorly to high-t
+- Gradient norm variance from ELBO weighting — dalpha/mask_prob creates spikes near t extremes. Partially addressed by tightening t range to [0.05-0.75].
+- Self-conditioning was tried and failed — too expensive (double fwd cost) and model wasn't trained for it at eval time.
 
 ### Ideas to Try (Priority Order)
 
-1. **[DONE - no effect] Zero skip / remove skip** — skip was removed, model works without it
+1. **[DONE - no effect] Zero skip / remove skip** — skip removed, model works without it
 2. **[DONE - marginal] Higher LR / different schedules / ELBO steps** — all gave ~3.48 BPB
 3. **[DONE - BREAKTHROUGH] RoPE** — unlocked context usage, BPB 3.45→2.42
-4. **[DONE - best] Muon optimizer + fixed 50% masking** — current best config
-5. **More training time** — 600s run in progress, loss still dropping
-6. **Scale model** — try 4L/512d (~11.5M params) for wider attention
-7. **Self-conditioning** — double effective depth at eval time
-8. **Multi-rate masking per batch** — each sequence gets different mask rate
-9. **Increase seq_len to 1024** — match AR baseline context length
-10. **Weight tying with RoPE** — save params, might help at this scale
+4. **[DONE - BREAKTHROUGH] ELBO importance weighting + variable-t** — made variable-t work, BPB 2.42→2.18
+5. **[DONE - best] Muon optimizer** — essential for training attention
+6. **[DONE - hurt] Self-conditioning** — double fwd cost, model not trained for it
+7. **[DONE - no gain] AdaLN-Zero** — too many params for no gain
+8. **[DONE - marginal] Depth recurrence 3L×2** — competitive short runs, worse long runs
+9. **[DONE - marginal] SwiGLU activation** — marginal gain (2.1775 vs 2.1787) not worth 25% more params
+10. **[DONE - BEST] Even tighter t range [0.1-0.6]** — combined with longer training, BPB 2.18→2.08
+11. **Variance reduction** — antithetic sampling or control variates for ELBO gradient
+12. **[DONE - BEST] More training time** — 2400s→2.14, 3600s→2.08, loss still dropping
+13. **Scale model** — now that training works, try larger models with longer training
+14. **Increase seq_len to 1024** — was tried at 300s and hurt (fewer steps), revisit with longer training
 
 ### Architecture
 
 - Absorbing-state MDLM: forward process masks tokens, model denoises
 - Bidirectional transformer (no causal mask)
-- Skip connection: identity signal at unmasked positions, zeroed at masked (after fix)
-- Cosine noise schedule
-- ELBO-based BPB evaluation
+- RoPE (rotary position embeddings) in attention
+- t-conditioning: linear projection of scalar t added to input embeddings
+- Variable-t training with ELBO importance weighting (dalpha/mask_prob)
+- Cosine noise schedule, t sampled from [0.1, 0.6]
+- Muon optimizer (Newton-Schulz for 2D matrices, Adam for embeddings/scalars)
+- Logit softcap (30.0)
+- ELBO-based BPB evaluation (64 steps)
 - 1024-token BPE vocabulary (sentencepiece)
+- 6L/384d, 6 heads, MLP 3x, seq 512, ~9.8M params
 
 ### Constraints
 
@@ -72,7 +95,7 @@ Best BPB: **2.288** (6L/384d, RoPE, fixed 50% masking, Muon optimizer, 300s trai
 - BPB evaluated on FineWeb validation set
 - Must use sentencepiece tokenizer at `data/tokenizers/fineweb_1024_bpe.model`
 - Training data at `data/datasets/fineweb10B_sp1024/`
-- Target: beat AR baseline of 1.11 BPB (ambitious — start by getting below 3.0)
+- Target: beat AR baseline of 1.11 BPB (ambitious — start by getting below 2.0)
 
 ### Don'ts
 
@@ -80,3 +103,4 @@ Best BPB: **2.288** (6L/384d, RoPE, fixed 50% masking, Muon optimizer, 300s trai
 - Don't install packages beyond what's available (mlx, numpy, sentencepiece)
 - Don't change the ELBO evaluation methodology (it's correct per MDLM paper)
 - Don't make multiple changes per run — isolate variables
+- Don't use AdamW — Muon is essential for training attention

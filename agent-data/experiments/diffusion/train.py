@@ -33,7 +33,8 @@ TOKENIZER_PATH = str(REPO_ROOT / "data" / "tokenizers" / "fineweb_1024_bpe.model
 
 VOCAB_SIZE = 1024
 MASK_TOKEN_ID = VOCAB_SIZE
-NUM_LAYERS = 6
+NUM_LAYERS = 6  # Unique layers
+NUM_LOOPS = 1   # Loop through layers this many times (effective depth = NUM_LAYERS * NUM_LOOPS)
 MODEL_DIM = 384
 NUM_HEADS = 6
 MLP_MULT = 3
@@ -50,7 +51,7 @@ EVAL_ELBO_STEPS = 64
 TRAIN_BATCH_TOKENS = 4096
 WARMUP_STEPS = 50
 WARMDOWN_FRAC = 0.15
-MAX_ITERATIONS = 20_000
+MAX_ITERATIONS = 40_000
 VAL_BATCH_TOKENS = 4096
 MATRIX_LR = 0.02
 SCALAR_LR = 0.02
@@ -307,16 +308,24 @@ class DiffusionLM(nn.Module):
         self.logit_softcap = LOGIT_SOFTCAP
         # RoPE precomputed
         self._rope_cos, self._rope_sin = _build_rope_freqs(seq_len, dim // n_heads)
+        # t conditioning: scalar t → dim
+        self.t_embed = nn.Linear(1, dim, bias=True)
 
     def __call__(self, x_noised, t_value, mask=None):
         B, T = x_noised.shape
         h = self.embed(x_noised).astype(COMPUTE_DTYPE)
 
+        # Condition on noise level
+        t_scalar = mx.array([[t_value]]).astype(COMPUTE_DTYPE)
+        t_bias = self.t_embed(t_scalar)  # (1, 1, dim)
+        h = h + t_bias
+
         rope_cos = self._rope_cos[:T].astype(COMPUTE_DTYPE)
         rope_sin = self._rope_sin[:T].astype(COMPUTE_DTYPE)
 
-        for block in self.blocks:
-            h = block(h, rope_cos, rope_sin)
+        for _ in range(NUM_LOOPS):
+            for block in self.blocks:
+                h = block(h, rope_cos, rope_sin)
         h = rms_norm(h)
 
         logits = self.out_head(h)
@@ -333,9 +342,11 @@ _CURRICULUM_PROGRESS = 0.0  # Set by training loop
 def diffusion_loss(model, tokens):
     B, T = tokens.shape
 
-    # Fixed 50% masking — matches ELBO weight peak
-    t_val = 0.5
-    mask_prob = 0.50
+    # Sample t uniformly, with ELBO importance weighting to prevent
+    # high-t gradient domination (the key missing piece from run 16)
+    t_val = float(mx.random.uniform(low=0.1, high=0.6, shape=()))
+    mask_prob = max(get_mask_prob(t_val), 0.01)
+    dalpha = get_dalpha_dt(t_val)
 
     mask = mx.random.uniform(shape=(B, T)) < mask_prob
     masked_tokens = mx.where(mask, MASK_TOKEN_ID, tokens)
@@ -344,10 +355,12 @@ def diffusion_loss(model, tokens):
     logits_flat = logits.reshape(-1, VOCAB_SIZE).astype(mx.float32)
     targets_flat = tokens.reshape(-1)
 
-    # Loss ONLY at masked positions
+    # CE at masked positions, weighted by ELBO importance (dalpha / mask_prob)
+    # This makes the loss an unbiased estimate of the ELBO across t values
     per_tok = nn.losses.cross_entropy(logits_flat, targets_flat, reduction="none")
     mask_flat = mask.reshape(-1).astype(mx.float32)
-    loss = mx.sum(per_tok * mask_flat) / mx.maximum(mx.sum(mask_flat), mx.array(1.0))
+    avg_ce = mx.sum(per_tok * mask_flat) / mx.maximum(mx.sum(mask_flat), mx.array(1.0))
+    loss = avg_ce * (dalpha / mask_prob)
     return loss
 
 
