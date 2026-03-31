@@ -52,3 +52,4 @@ extend-t-005-120s	2.5052	worse	Extended t range [0.05-0.6] 11 strata, 120s — l
 ema-120s	2.8962	worse	EMA weights (decay=0.999) for eval, 120s — EMA lags behind rapidly improving weights at short training
 qknorm-120s	2.4558	better	QK-norm (rms_norm on Q,K), 120s — smoother gnorm, new 120s best
 qknorm-3600s	2.0570	BEST	QK-norm (rms_norm on Q,K), 3600s, 8634 steps (throttled!) — NEW ALL-TIME BEST despite 3.7x fewer steps
+qknorm-3600s-full	1.9206	BEST	QK-norm full unthrottled 3600s, 30174 steps — BROKE 2.0 BARRIER, NEW ALL-TIME BEST

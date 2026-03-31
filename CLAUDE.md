@@ -27,12 +27,13 @@ Follow the loop in `agent-data/experiments/diffusion/program.md`:
 
 ### Current Status
 
-Best BPB: **2.0570** (6L/384d, RoPE, QK-norm, variable-t [0.1-0.6] + ELBO weighting, stratified t sampling, Muon optimizer, 3600s training, 8634 steps — throttled machine, only 27% of expected steps)
+Best BPB: **1.9206** (6L/384d, RoPE, QK-norm, variable-t [0.1-0.6] + ELBO weighting, stratified t sampling, Muon optimizer, 3600s training, 30174 steps — BROKE 2.0 BARRIER)
 
 **KEY BREAKTHROUGHS** (in order of impact):
 1. **RoPE** — Without positional info in attention, the model learned a global unigram prior (CE ~5.9 at ALL noise levels). With RoPE, BPB dropped 3.45 → 2.42 in a single change.
 2. **ELBO importance weighting** — Loss multiplied by `dalpha/mask_prob` downweights high-t steps where gradients are noisy. This made variable-t training work (previously caused attention collapse).
 3. **Variable-t training [0.05-0.75]** — With ELBO weighting, variable-t outperforms fixed 50% masking. Tight range avoids the near-random high-t regime.
+4. **QK-norm** — rms_norm on Q,K before attention dot product. Eliminates gnorm spikes, stabilizes training. BPB 2.0758→1.9206 (full 3600s run). Model now beats 2.0 barrier.
 
 **Current findings**:
 - Muon optimizer is ESSENTIAL — AdamW cannot train attention (BPB stays 3.47)
@@ -42,17 +43,19 @@ Best BPB: **2.0570** (6L/384d, RoPE, QK-norm, variable-t [0.1-0.6] + ELBO weight
 - Logit softcap helps stability for long training (removing it hurt 600s runs)
 - Depth recurrence (3L×2) is competitive for short runs but unique layers win with more training
 - Stratified t sampling (10 strata) smooths loss/gnorm curves, marginal BPB gain (2.0812→2.0758)
-- QK-norm (rms_norm on Q,K before attention) stabilizes training, eliminates gnorm spikes, BPB 2.0758→2.0570
+- QK-norm (rms_norm on Q,K before attention) stabilizes training, eliminates gnorm spikes, BPB 2.0758→1.9206
+- Loss still dropping at 30K steps (final smoothed loss ~10.2) — more training time will continue improving
+- At t=0.05 the model achieves CE=0.86, which is BELOW the AR baseline of 1.11
 - Target: AR baseline is 1.11 BPB
 
-**Per-t diagnostics (3600s QK-norm best run, 8634 steps throttled)**:
-- t=0.05: CE=1.36
-- t=0.10: CE=1.59
-- t=0.20: CE=1.64
-- t=0.30: CE=2.06
-- t=0.50: CE=3.42
-- t=0.70: CE=4.92
-- t=0.90: CE=5.96
+**Per-t diagnostics (3600s QK-norm full run, 30174 steps)**:
+- t=0.05: CE=0.86
+- t=0.10: CE=1.12
+- t=0.20: CE=1.38
+- t=0.30: CE=1.85
+- t=0.50: CE=3.08
+- t=0.70: CE=4.82
+- t=0.90: CE=5.88
 
 ### Known Issues
 
@@ -76,7 +79,7 @@ Best BPB: **2.0570** (6L/384d, RoPE, QK-norm, variable-t [0.1-0.6] + ELBO weight
 12. **[DONE - BEST] More training time** — 2400s→2.14, 3600s→2.08, loss still dropping
 13. **Scale model** — now that training works, try larger models with longer training
 14. **Increase seq_len to 1024** — was tried at 300s and hurt (fewer steps), revisit with longer training
-15. **[DONE - BEST] QK-norm** — rms_norm on Q,K before attention, BPB 2.0758→2.0570 (despite 3.7x fewer steps from throttling)
+15. **[DONE - BEST] QK-norm** — rms_norm on Q,K before attention, BPB 2.0758→1.9206 (full 3600s, 30174 steps)
 16. **[DONE - hurt] Extended t range [0.05-0.6]** — low-t ELBO weights too high, hurt training
 17. **[DONE - hurt] EMA weights** — EMA lags behind rapidly improving weights at short training
 
@@ -101,7 +104,7 @@ Best BPB: **2.0570** (6L/384d, RoPE, QK-norm, variable-t [0.1-0.6] + ELBO weight
 - BPB evaluated on FineWeb validation set
 - Must use sentencepiece tokenizer at `data/tokenizers/fineweb_1024_bpe.model`
 - Training data at `data/datasets/fineweb10B_sp1024/`
-- Target: beat AR baseline of 1.11 BPB (ambitious — start by getting below 2.0)
+- Target: beat AR baseline of 1.11 BPB (broke 2.0 barrier — now targeting below 1.5)
 
 ### Don'ts
 
