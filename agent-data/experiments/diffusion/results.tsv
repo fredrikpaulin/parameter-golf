@@ -62,3 +62,4 @@ narrow-t-05-3600s	1.9168	BEST	t range [0.1-0.5] 8 strata, 3600s, 35018 steps —
 narrow-t-04-3600s	1.9524	worse	t range [0.1-0.4] 6 strata, 3600s — too narrow, model over-specializes, t=0.05 CE regressed
 weight-decay-3600s	1.9489	worse	Weight decay 0.01 on matrix params, 3600s — regularization fights useful learning
 gelu-3600s	1.9067	BEST	GeLU activation (was relu²), 3600s, 33752 steps — smoother gradients, lower loss plateau, NEW ALL-TIME BEST
+gelu-21600s	1.8901	BEST	6-hour run, hit MAX_ITERATIONS=120K at 12770s — left half the budget unused, NEW ALL-TIME BEST

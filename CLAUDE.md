@@ -27,7 +27,7 @@ Follow the loop in `agent-data/experiments/diffusion/program.md`:
 
 ### Current Status
 
-Best BPB: **1.9067** (6L/384d, RoPE, QK-norm, GeLU, variable-t [0.1-0.5] + ELBO weighting, stratified t sampling (8 strata), Muon optimizer, 3600s training, 33752 steps)
+Best BPB: **1.8901** (6L/384d, RoPE, QK-norm, GeLU, variable-t [0.1-0.5] + ELBO weighting, stratified t sampling (8 strata), Muon optimizer, 12770s training, 120K steps — hit iteration cap before time budget)
 
 **KEY BREAKTHROUGHS** (in order of impact):
 1. **RoPE** — Without positional info in attention, the model learned a global unigram prior (CE ~5.9 at ALL noise levels). With RoPE, BPB dropped 3.45 → 2.42 in a single change.
@@ -48,14 +48,14 @@ Best BPB: **1.9067** (6L/384d, RoPE, QK-norm, GeLU, variable-t [0.1-0.5] + ELBO 
 - At t=0.05 the model achieves CE=0.86, which is BELOW the AR baseline of 1.11
 - Target: AR baseline is 1.11 BPB
 
-**Per-t diagnostics (3600s GeLU run, 33752 steps)**:
-- t=0.05: CE=0.61
-- t=0.10: CE=1.07
-- t=0.20: CE=1.17
-- t=0.30: CE=1.57
-- t=0.50: CE=3.20
-- t=0.70: CE=4.88
-- t=0.90: CE=5.97
+**Per-t diagnostics (12770s GeLU run, 120K steps)**:
+- t=0.05: CE=0.77
+- t=0.10: CE=0.83
+- t=0.20: CE=1.20
+- t=0.30: CE=1.63
+- t=0.50: CE=3.16
+- t=0.70: CE=4.84
+- t=0.90: CE=6.05
 
 ### Known Issues
 
