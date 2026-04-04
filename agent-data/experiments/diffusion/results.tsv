@@ -64,3 +64,4 @@ weight-decay-3600s	1.9489	worse	Weight decay 0.01 on matrix params, 3600s — re
 gelu-3600s	1.9067	BEST	GeLU activation (was relu²), 3600s, 33752 steps — smoother gradients, lower loss plateau, NEW ALL-TIME BEST
 gelu-21600s	1.8901	BEST	6-hour run, hit MAX_ITERATIONS=120K at 12770s — left half the budget unused, NEW ALL-TIME BEST
 gelu-21600s-full	1.8013	BEST	Full 6-hour run with proper warmdown, 200969 steps — t=0.20 CE=1.07 beats AR baseline, NEW ALL-TIME BEST
+gelu-43200s	1.7644	BEST	12-hour run with checkpoint restart, 402063 steps — t=0.20 CE=0.91, NEW ALL-TIME BEST

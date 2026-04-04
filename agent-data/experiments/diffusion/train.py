@@ -7,7 +7,9 @@ Bidirectional transformer backbone — no causal mask.
 """
 from __future__ import annotations
 
+import gc
 import glob
+import json
 import math
 import os
 import time
@@ -51,7 +53,7 @@ EVAL_ELBO_STEPS = 64
 TRAIN_BATCH_TOKENS = 4096
 WARMUP_STEPS = 50
 WARMDOWN_FRAC = 0.15
-MAX_ITERATIONS = 250_000
+MAX_ITERATIONS = 500_000
 VAL_BATCH_TOKENS = 4096
 MATRIX_LR = 0.02
 SCALAR_LR = 0.02
@@ -59,6 +61,70 @@ EMBED_LR = 0.03
 MUON_MOMENTUM = 0.95
 MUON_STEPS = 5
 GRAD_CLIP = 1.0
+CHECKPOINT_EVERY = 100_000  # Save checkpoint every N steps to survive OOM at ~248K
+CHECKPOINT_DIR = Path(__file__).resolve().parent / "checkpoints"
+
+# ==============================================================================
+# CHECKPOINTING
+# ==============================================================================
+
+def save_checkpoint(model, split_opt, step, total_training_time, smooth_loss, train_loader):
+    """Save model weights, optimizer momentum, and training state."""
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
+    # Model weights
+    params = dict(tree_flatten(model.parameters()))
+    npz_params = {k: np.array(v) for k, v in params.items()}
+    np.savez(str(CHECKPOINT_DIR / "model.npz"), **npz_params)
+    # Muon momentum buffers
+    npz_bufs = {k: np.array(v) for k, v in split_opt.muon_bufs.items()}
+    np.savez(str(CHECKPOINT_DIR / "muon_bufs.npz"), **npz_bufs)
+    # Training state
+    state = {
+        "step": step,
+        "total_training_time": total_training_time,
+        "smooth_loss": smooth_loss,
+        "data_file_idx": train_loader.file_idx,
+        "data_pos": train_loader.pos,
+    }
+    with open(CHECKPOINT_DIR / "state.json", "w") as f:
+        json.dump(state, f)
+    print(f"  [checkpoint saved at step {step}, time={total_training_time:.0f}s]")
+
+
+def load_checkpoint(model, split_opt, train_loader):
+    """Load checkpoint if it exists. Returns (step, total_training_time, smooth_loss) or None."""
+    state_path = CHECKPOINT_DIR / "state.json"
+    if not state_path.exists():
+        return None
+    with open(state_path) as f:
+        state = json.load(f)
+    # Model weights
+    data = np.load(str(CHECKPOINT_DIR / "model.npz"))
+    params = {k: mx.array(data[k]) for k in data.files}
+    model.update(tree_unflatten(list(params.items())))
+    mx.eval(model.parameters())
+    # Muon momentum buffers
+    buf_data = np.load(str(CHECKPOINT_DIR / "muon_bufs.npz"))
+    for k in buf_data.files:
+        if k in split_opt.muon_bufs:
+            split_opt.muon_bufs[k] = mx.array(buf_data[k])
+    mx.eval(*split_opt.muon_bufs.values())
+    # Restore data loader position
+    train_loader.file_idx = state["data_file_idx"]
+    train_loader.tokens = load_data_shard(train_loader.files[train_loader.file_idx])
+    train_loader.pos = state["data_pos"]
+    print(f"  [checkpoint loaded: step={state['step']}, time={state['total_training_time']:.0f}s]")
+    return state["step"], state["total_training_time"], state["smooth_loss"]
+
+
+def clear_checkpoint():
+    """Remove checkpoint after successful completion."""
+    if CHECKPOINT_DIR.exists():
+        for f in CHECKPOINT_DIR.iterdir():
+            f.unlink()
+        CHECKPOINT_DIR.rmdir()
+        print("  [checkpoint cleared]")
+
 
 # ==============================================================================
 # HELPERS
@@ -129,6 +195,8 @@ class SplitOptimizer:
             scalar_upd = self.adam_scalar.apply_gradients(scalar_g, scalar_p)
             updated.update(scalar_upd)
         model.update(tree_unflatten(list(updated.items())))
+        # Evaluate momentum buffers to prevent MLX computation graph accumulation
+        mx.eval(*self.muon_bufs.values())
 
 
 def load_data_shard(path):
@@ -487,6 +555,11 @@ def main():
     step = 0
     smooth_loss = 0.0
 
+    # Resume from checkpoint if available
+    ckpt = load_checkpoint(model, split_opt, train_loader)
+    if ckpt is not None:
+        step, total_training_time, smooth_loss = ckpt
+
     while step < MAX_ITERATIONS:
         t0 = time.time()
 
@@ -534,6 +607,10 @@ def main():
                   f"remaining: {remaining:.0f}s")
 
         step += 1
+        if step % 5000 == 0:
+            gc.collect()
+        if step % CHECKPOINT_EVERY == 0 and step > 0:
+            save_checkpoint(model, split_opt, step, total_training_time, smooth_loss, train_loader)
         if step > 5 and total_training_time >= TIME_BUDGET:
             break
 
@@ -562,6 +639,7 @@ def main():
     val_bpb = compute_elbo_bpb(model, val_loader, bytes_per_token,
                                 num_steps=EVAL_ELBO_STEPS, num_batches=8)
 
+    clear_checkpoint()  # Clean up after successful completion
     t_end = time.time()
     print("---")
     print(f"val_bpb:          {val_bpb:.6f}")
