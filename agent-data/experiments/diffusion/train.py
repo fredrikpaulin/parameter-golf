@@ -134,6 +134,28 @@ def rms_norm(x, eps=1e-6):
     return (x * mx.rsqrt(mx.mean(x * x, axis=-1, keepdims=True) + eps)).astype(x.dtype)
 
 
+def hadamard_transform(x):
+    """Fast Walsh-Hadamard transform on the last dimension.
+    Spreads energy evenly across dimensions, flattening outliers.
+    x shape: (..., d) where d must be a power of 2.
+    Returns: rotated x, normalized by 1/sqrt(d)."""
+    d = x.shape[-1]
+    orig_shape = x.shape
+    # Flatten leading dims: (*, d)
+    x = x.reshape(-1, d)
+    n = x.shape[0]
+    h = 1
+    while h < d:
+        # Reshape to (n, d/(2h), 2, h) for butterfly
+        x = x.reshape(n, d // (2 * h), 2, h)
+        a = x[:, :, 0, :] + x[:, :, 1, :]
+        b = x[:, :, 0, :] - x[:, :, 1, :]
+        x = mx.concatenate([a[:, :, None, :], b[:, :, None, :]], axis=2)
+        x = x.reshape(n, d)
+        h *= 2
+    return (x * (1.0 / math.sqrt(d))).reshape(orig_shape)
+
+
 def zeropower_newtonschulz5(g, steps=5, eps=1e-7):
     """Orthogonalize a 2D matrix with Newton-Schulz iteration (Muon optimizer)."""
     a, b, c = 3.4445, -4.7750, 2.0315
