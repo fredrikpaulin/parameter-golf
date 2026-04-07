@@ -69,3 +69,4 @@ hadamard-qknorm-3600s	1.9409	worse	Hadamard rotation before QK-norm, 3600s, 2588
 cosine-s003-3600s	1.9038	same	Cosine schedule s=0.03 (was 0.008), 3600s — marginal, within noise, smooth loss slightly worse
 gelu-43200s-v2	1.7599	BEST	12-hour run v2, 400530 steps, smooth loss 8.28 — still dropping, NEW ALL-TIME BEST
 gelu-43200s-v3	1.7632	same	12-hour run v3, 402611 steps, smooth loss 8.73 — checkpoint saved for continuation
+gelu-86400s	1.7344	BEST	24-hour run (resumed from 400K), 809273 steps — t=0.30 CE=1.09 beats AR baseline, NEW ALL-TIME BEST

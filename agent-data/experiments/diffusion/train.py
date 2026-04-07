@@ -53,7 +53,7 @@ EVAL_ELBO_STEPS = 64
 TRAIN_BATCH_TOKENS = 4096
 WARMUP_STEPS = 50
 WARMDOWN_FRAC = 0.15
-MAX_ITERATIONS = 500_000
+MAX_ITERATIONS = 1_000_000
 VAL_BATCH_TOKENS = 4096
 MATRIX_LR = 0.02
 SCALAR_LR = 0.02
@@ -661,7 +661,8 @@ def main():
     val_bpb = compute_elbo_bpb(model, val_loader, bytes_per_token,
                                 num_steps=EVAL_ELBO_STEPS, num_batches=8)
 
-    clear_checkpoint()  # Clean up after successful completion
+    # Save final checkpoint so training can be resumed later
+    save_checkpoint(model, split_opt, step, total_training_time, smooth_loss, train_loader)
     t_end = time.time()
     print("---")
     print(f"val_bpb:          {val_bpb:.6f}")
