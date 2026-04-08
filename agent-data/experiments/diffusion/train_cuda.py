@@ -61,9 +61,11 @@ NUM_LAYERS = 6
 MODEL_DIM = 768
 NUM_HEADS = 12
 MLP_MULT = 3
-SEQ_LEN = 1024
+SEQ_LEN = 512
 LOGIT_SOFTCAP = 30.0
 
+T_MIN = 0.1
+T_MAX = 0.5
 NOISE_SCHEDULE = "cosine"
 SIGMA_MIN = 1e-4
 SIGMA_MAX = 20.0
@@ -375,10 +377,11 @@ def load_checkpoint(model, opt, train_loader):
     if not ckpt_path.exists():
         return None
     ckpt = torch.load(str(ckpt_path), map_location=DEVICE, weights_only=False)
-    # Skip checkpoint if model architecture changed (e.g. different dim)
+    # Skip checkpoint if model architecture changed (e.g. different dim or seq_len)
     ckpt_dim = ckpt["model"].get("embed.weight", torch.empty(0,0)).shape[-1]
-    if ckpt_dim != MODEL_DIM:
-        log(f"  [checkpoint skipped: dim {ckpt_dim} != {MODEL_DIM}, training from scratch]")
+    ckpt_seq = ckpt["model"].get("_rope_cos", torch.empty(0,0)).shape[0]
+    if ckpt_dim != MODEL_DIM or ckpt_seq != SEQ_LEN:
+        log(f"  [checkpoint skipped: dim={ckpt_dim}/seq={ckpt_seq} vs {MODEL_DIM}/{SEQ_LEN}, training from scratch]")
         return None
     model.load_state_dict(ckpt["model"])
     opt.load_state_dict(ckpt["optimizer"])
@@ -400,8 +403,9 @@ def diffusion_loss(model, tokens):
     B, T = tokens.shape
 
     stratum = _GLOBAL_STEP % _N_STRATA
-    t_lo = 0.1 + stratum * 0.05
-    t_hi = t_lo + 0.05
+    stride = (T_MAX - T_MIN) / _N_STRATA
+    t_lo = T_MIN + stratum * stride
+    t_hi = t_lo + stride
     t_val = float(torch.empty(1).uniform_(t_lo, t_hi).item())
     mask_prob = max(get_mask_prob(t_val), 0.01)
     dalpha = get_dalpha_dt(t_val)
@@ -552,8 +556,9 @@ def main():
         # All ranks must use the same t_val for DDP gradient sync
         if IS_DDP:
             stratum = step % _N_STRATA
-            t_lo = 0.1 + stratum * 0.05
-            t_hi = t_lo + 0.05
+            stride = (T_MAX - T_MIN) / _N_STRATA
+            t_lo = T_MIN + stratum * stride
+            t_hi = t_lo + stride
             # Broadcast t from rank 0
             t_tensor = torch.empty(1, device=DEVICE)
             if IS_MASTER:
