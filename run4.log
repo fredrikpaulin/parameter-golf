@@ -1,0 +1,89 @@
+DiffusionLM: 6L dim=384 heads=6 mlp=3x seq=512 batch=8
+Schedule: cosine | ELBO steps: 64 | Muon LR: 0.02
+Time budget: 120.0s
+  t=0.00: mask_prob=0.0000 sigma_bar=0.0000 dalpha_dt=0.0437
+  t=0.25: mask_prob=0.1530 sigma_bar=0.1660 dalpha_dt=1.1225
+  t=0.50: mask_prob=0.5062 sigma_bar=0.7055 dalpha_dt=1.5585
+  t=0.75: mask_prob=0.8557 sigma_bar=1.9361 dalpha_dt=1.0952
+  t=1.00: mask_prob=1.0000 sigma_bar=12.9281 dalpha_dt=0.0049
+Parameters: 10,127,488
+step 00000 (0.0%) | loss: 7.7692 | gnorm: 5.1280 | dt: 136ms | tok/s: 30,101 | remaining: 120s
+step 00020 (1.1%) | loss: 7.2246 | gnorm: 1.2289 | dt: 93ms | tok/s: 44,159 | remaining: 119s
+step 00040 (2.6%) | loss: 6.8988 | gnorm: 1.3408 | dt: 93ms | tok/s: 43,971 | remaining: 117s
+step 00060 (4.1%) | loss: 6.7070 | gnorm: 1.0688 | dt: 93ms | tok/s: 44,195 | remaining: 115s
+step 00080 (5.7%) | loss: 6.6635 | gnorm: 1.6585 | dt: 93ms | tok/s: 44,001 | remaining: 113s
+step 00100 (7.2%) | loss: 6.6175 | gnorm: 0.7883 | dt: 90ms | tok/s: 45,316 | remaining: 111s
+step 00120 (8.7%) | loss: 6.6437 | gnorm: 1.3603 | dt: 94ms | tok/s: 43,535 | remaining: 109s
+step 00140 (10.2%) | loss: 6.5793 | gnorm: 4.1685 | dt: 93ms | tok/s: 43,817 | remaining: 108s
+step 00160 (11.8%) | loss: 6.4364 | gnorm: 0.9727 | dt: 90ms | tok/s: 45,642 | remaining: 106s
+step 00180 (13.3%) | loss: 6.3343 | gnorm: 0.9113 | dt: 90ms | tok/s: 45,496 | remaining: 104s
+step 00200 (14.8%) | loss: 6.3823 | gnorm: 1.2891 | dt: 94ms | tok/s: 43,692 | remaining: 102s
+step 00220 (16.4%) | loss: 6.3384 | gnorm: 1.6211 | dt: 93ms | tok/s: 43,974 | remaining: 100s
+step 00240 (17.9%) | loss: 6.3018 | gnorm: 0.7930 | dt: 90ms | tok/s: 45,515 | remaining: 98s
+step 00260 (19.4%) | loss: 6.2883 | gnorm: 0.9830 | dt: 91ms | tok/s: 45,111 | remaining: 97s
+step 00280 (20.9%) | loss: 6.3692 | gnorm: 4.0121 | dt: 93ms | tok/s: 44,099 | remaining: 95s
+step 00300 (22.5%) | loss: 6.3982 | gnorm: 0.8573 | dt: 90ms | tok/s: 45,289 | remaining: 93s
+step 00320 (24.0%) | loss: 6.3864 | gnorm: 1.4943 | dt: 93ms | tok/s: 44,037 | remaining: 91s
+step 00340 (25.5%) | loss: 6.3981 | gnorm: 0.8379 | dt: 90ms | tok/s: 45,603 | remaining: 89s
+step 00360 (27.0%) | loss: 6.2706 | gnorm: 0.8978 | dt: 89ms | tok/s: 45,780 | remaining: 87s
+step 00380 (28.6%) | loss: 6.3563 | gnorm: 0.8649 | dt: 91ms | tok/s: 45,145 | remaining: 86s
+step 00400 (30.1%) | loss: 6.2641 | gnorm: 0.7414 | dt: 90ms | tok/s: 45,430 | remaining: 84s
+step 00420 (31.6%) | loss: 6.3118 | gnorm: 1.5599 | dt: 91ms | tok/s: 44,893 | remaining: 82s
+step 00440 (33.1%) | loss: 6.3805 | gnorm: 0.8723 | dt: 90ms | tok/s: 45,604 | remaining: 80s
+step 00460 (34.6%) | loss: 6.2474 | gnorm: 0.9328 | dt: 90ms | tok/s: 45,369 | remaining: 78s
+step 00480 (36.2%) | loss: 6.3567 | gnorm: 0.8523 | dt: 91ms | tok/s: 45,212 | remaining: 77s
+step 00500 (37.7%) | loss: 6.3493 | gnorm: 1.1597 | dt: 93ms | tok/s: 43,841 | remaining: 75s
+step 00520 (39.2%) | loss: 6.2982 | gnorm: 0.7149 | dt: 91ms | tok/s: 45,091 | remaining: 73s
+step 00540 (40.8%) | loss: 6.3955 | gnorm: 2.9522 | dt: 93ms | tok/s: 43,821 | remaining: 71s
+step 00560 (42.3%) | loss: 6.3091 | gnorm: 0.8737 | dt: 91ms | tok/s: 45,050 | remaining: 69s
+step 00580 (43.8%) | loss: 6.2830 | gnorm: 0.8663 | dt: 90ms | tok/s: 45,714 | remaining: 67s
+step 00600 (45.3%) | loss: 6.2725 | gnorm: 0.9139 | dt: 90ms | tok/s: 45,363 | remaining: 66s
+step 00620 (46.9%) | loss: 6.3250 | gnorm: 0.7033 | dt: 91ms | tok/s: 45,144 | remaining: 64s
+step 00640 (48.4%) | loss: 6.2826 | gnorm: 0.9955 | dt: 90ms | tok/s: 45,335 | remaining: 62s
+step 00660 (49.9%) | loss: 6.4702 | gnorm: 0.9772 | dt: 91ms | tok/s: 45,146 | remaining: 60s
+step 00680 (51.4%) | loss: 6.2796 | gnorm: 1.1025 | dt: 94ms | tok/s: 43,720 | remaining: 58s
+step 00700 (53.0%) | loss: 6.3442 | gnorm: 1.0423 | dt: 94ms | tok/s: 43,572 | remaining: 56s
+step 00720 (54.5%) | loss: 6.4439 | gnorm: 1.3595 | dt: 93ms | tok/s: 44,019 | remaining: 55s
+step 00740 (56.0%) | loss: 6.3703 | gnorm: 0.6055 | dt: 90ms | tok/s: 45,523 | remaining: 53s
+step 00760 (57.5%) | loss: 6.4017 | gnorm: 0.6236 | dt: 89ms | tok/s: 45,962 | remaining: 51s
+step 00780 (59.0%) | loss: 6.3530 | gnorm: 0.9474 | dt: 90ms | tok/s: 45,438 | remaining: 49s
+step 00800 (60.6%) | loss: 6.3224 | gnorm: 0.8471 | dt: 91ms | tok/s: 45,130 | remaining: 47s
+step 00820 (62.1%) | loss: 6.3100 | gnorm: 1.6682 | dt: 94ms | tok/s: 43,571 | remaining: 45s
+step 00840 (63.6%) | loss: 6.4023 | gnorm: 0.8177 | dt: 89ms | tok/s: 45,780 | remaining: 44s
+step 00860 (65.1%) | loss: 6.4002 | gnorm: 0.7151 | dt: 92ms | tok/s: 44,321 | remaining: 42s
+step 00880 (66.7%) | loss: 6.2978 | gnorm: 0.8740 | dt: 91ms | tok/s: 45,170 | remaining: 40s
+step 00900 (68.2%) | loss: 6.3186 | gnorm: 0.6948 | dt: 91ms | tok/s: 44,878 | remaining: 38s
+step 00920 (69.7%) | loss: 6.3312 | gnorm: 3.5839 | dt: 94ms | tok/s: 43,786 | remaining: 36s
+step 00940 (71.3%) | loss: 6.3430 | gnorm: 0.6850 | dt: 90ms | tok/s: 45,422 | remaining: 34s
+step 00960 (72.8%) | loss: 6.3358 | gnorm: 1.8219 | dt: 94ms | tok/s: 43,628 | remaining: 33s
+step 00980 (74.3%) | loss: 6.3235 | gnorm: 1.7169 | dt: 94ms | tok/s: 43,645 | remaining: 31s
+step 01000 (75.8%) | loss: 6.2555 | gnorm: 0.8091 | dt: 90ms | tok/s: 45,404 | remaining: 29s
+step 01020 (77.4%) | loss: 6.3262 | gnorm: 0.7346 | dt: 90ms | tok/s: 45,274 | remaining: 27s
+step 01040 (78.9%) | loss: 6.3988 | gnorm: 1.2414 | dt: 93ms | tok/s: 44,198 | remaining: 25s
+step 01060 (80.4%) | loss: 6.3844 | gnorm: 0.6227 | dt: 90ms | tok/s: 45,579 | remaining: 23s
+step 01080 (81.9%) | loss: 6.3164 | gnorm: 0.9405 | dt: 90ms | tok/s: 45,747 | remaining: 22s
+step 01100 (83.4%) | loss: 6.4141 | gnorm: 0.9194 | dt: 91ms | tok/s: 45,163 | remaining: 20s
+step 01120 (84.9%) | loss: 6.3267 | gnorm: 0.7824 | dt: 91ms | tok/s: 45,177 | remaining: 18s
+step 01140 (86.5%) | loss: 6.3269 | gnorm: 0.6707 | dt: 91ms | tok/s: 45,121 | remaining: 16s
+step 01160 (88.0%) | loss: 6.3914 | gnorm: 0.9491 | dt: 91ms | tok/s: 45,189 | remaining: 14s
+step 01180 (89.5%) | loss: 6.3780 | gnorm: 1.0444 | dt: 94ms | tok/s: 43,800 | remaining: 13s
+step 01200 (91.0%) | loss: 6.3727 | gnorm: 0.6455 | dt: 92ms | tok/s: 44,463 | remaining: 11s
+step 01220 (92.6%) | loss: 6.4372 | gnorm: 0.8414 | dt: 91ms | tok/s: 44,942 | remaining: 9s
+step 01240 (94.1%) | loss: 6.4133 | gnorm: 0.9256 | dt: 91ms | tok/s: 44,868 | remaining: 7s
+step 01260 (95.6%) | loss: 6.2924 | gnorm: 1.6123 | dt: 95ms | tok/s: 43,191 | remaining: 5s
+step 01280 (97.2%) | loss: 6.3617 | gnorm: 0.8019 | dt: 91ms | tok/s: 45,063 | remaining: 3s
+step 01300 (98.7%) | loss: 6.3375 | gnorm: 0.7098 | dt: 91ms | tok/s: 44,781 | remaining: 1s
+
+ELBO eval (64 levels x 8 batches)...
+  ELBO eval 4/8
+  ELBO eval 8/8
+---
+val_bpb:          3.482634
+training_seconds: 120.0
+total_seconds:    130.0
+num_steps:        1317
+num_params_M:     10.1
+model_dim:        384
+num_layers:       6
+noise_schedule:   cosine
+elbo_steps:       64

@@ -37,8 +37,8 @@ VOCAB_SIZE = 1024
 MASK_TOKEN_ID = VOCAB_SIZE
 NUM_LAYERS = 6  # Unique layers
 NUM_LOOPS = 1   # Loop through layers this many times (effective depth = NUM_LAYERS * NUM_LOOPS)
-MODEL_DIM = 384
-NUM_HEADS = 6
+MODEL_DIM = 512
+NUM_HEADS = 8
 MLP_MULT = 3
 SEQ_LEN = 512
 LOGIT_SOFTCAP = 30.0
@@ -430,6 +430,37 @@ class DiffusionLM(nn.Module):
 
 _CURRICULUM_PROGRESS = 0.0  # Set by training loop
 _GLOBAL_STEP = 0  # For stratified t sampling
+
+# ==============================================================================
+# FREQUENCY-INFORMED MASKING
+# ==============================================================================
+
+def _build_token_mask_weights():
+    """Build per-token mask probability weights from token frequencies.
+    Rare tokens get higher weight (masked more often), common tokens lower.
+    Uses sqrt(1/freq) scaling, clamped and normalized so mean weight = 1.0."""
+    freq_path = REPO_ROOT / "data" / "token_freqs_1024.npy"
+    if not freq_path.exists():
+        print("  [no token_freqs_1024.npy found, using uniform masking]")
+        return None
+    freqs = np.load(str(freq_path))
+    # Replace zeros with min nonzero freq to avoid div-by-zero
+    nonzero = freqs[freqs > 0]
+    if len(nonzero) == 0:
+        return None
+    freqs = np.maximum(freqs, nonzero.min())
+    # sqrt(1/freq) — gentler than 1/freq, avoids extreme weights
+    weights = np.sqrt(1.0 / freqs)
+    # Normalize so mean = 1.0 (preserves expected number of masked tokens)
+    weights = weights / weights.mean()
+    # Clamp to [0.2, 5.0] to prevent extremes
+    weights = np.clip(weights, 0.2, 5.0)
+    weights = weights / weights.mean()  # re-normalize after clamp
+    print(f"  [freq-masking: weight range {weights.min():.2f}–{weights.max():.2f}, "
+          f"mean={weights.mean():.2f}]")
+    return mx.array(weights.astype(np.float32))
+
+_TOKEN_MASK_WEIGHTS = None  # Initialized in main()
 
 # ==============================================================================
 # TRAINING LOSS — Variable t, masked-only CE
