@@ -93,6 +93,7 @@ class Hyperparameters:
     muon_momentum_warmup_start: float = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
     muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
+    weight_decay: float = float(os.environ.get("WEIGHT_DECAY", 0.04))
 
     out_dir: str = os.environ.get("OUT_DIR", "logs")
 
@@ -478,7 +479,10 @@ class Muon:
             g_eff = g + momentum * buf
             g_ortho = zeropower_newtonschulz5(g_eff, self.args.muon_backend_steps)
             scale = math.sqrt(max(1.0, float(p.shape[0]) / float(p.shape[1])))
-            out[k] = p - lr * (g_ortho * scale).astype(p.dtype)
+            update = lr * (g_ortho * scale).astype(p.dtype)
+            if self.args.weight_decay > 0:
+                update = update + lr * self.args.weight_decay * p
+            out[k] = p - update
         return out
 
 
@@ -503,17 +507,17 @@ class SplitOptimizers:
         ]
 
         self.muon = Muon(self.matrix_keys, params, args)
-        self.adam_embed = optim.Adam(
+        self.adam_embed = optim.AdamW(
             learning_rate=args.tied_embed_lr,
             betas=[args.beta1, args.beta2],
             eps=args.adam_eps,
-            bias_correction=True,
+            weight_decay=args.weight_decay,
         )
-        self.adam_scalar = optim.Adam(
+        self.adam_scalar = optim.AdamW(
             learning_rate=args.scalar_lr,
             betas=[args.beta1, args.beta2],
             eps=args.adam_eps,
-            bias_correction=True,
+            weight_decay=args.weight_decay,
         )
 
     def step(self, model: GPT, grads_tree: dict, step: int, lr_mul: float) -> None:
