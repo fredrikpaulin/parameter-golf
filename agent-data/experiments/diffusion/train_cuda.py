@@ -375,6 +375,11 @@ def load_checkpoint(model, opt, train_loader):
     if not ckpt_path.exists():
         return None
     ckpt = torch.load(str(ckpt_path), map_location=DEVICE, weights_only=False)
+    # Skip checkpoint if model architecture changed (e.g. different dim)
+    ckpt_dim = ckpt["model"].get("embed.weight", torch.empty(0,0)).shape[-1]
+    if ckpt_dim != MODEL_DIM:
+        log(f"  [checkpoint skipped: dim {ckpt_dim} != {MODEL_DIM}, training from scratch]")
+        return None
     model.load_state_dict(ckpt["model"])
     opt.load_state_dict(ckpt["optimizer"])
     train_loader.file_idx = ckpt["data_file_idx"]
