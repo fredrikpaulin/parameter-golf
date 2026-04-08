@@ -483,15 +483,10 @@ def main():
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {num_params:,}")
 
-    # torch.compile for H100 (requires compute capability >= 7.0)
+    # torch.compile disabled — model is small and t_value changes each step,
+    # causing constant recompilation that's slower than eager mode
     compiled = False
-    if hasattr(torch, "compile") and DEVICE == "cuda" and torch.cuda.get_device_capability()[0] >= 7:
-        try:
-            model = torch.compile(model)
-            compiled = True
-            print("Model compiled with torch.compile")
-        except Exception as e:
-            print(f"torch.compile failed ({e}), continuing without compilation")
+    print("Running in eager mode (model too small for torch.compile overhead)")
 
     train_loader = DataLoader(f"{DATA_PATH}/fineweb_train_*.bin", TRAIN_BATCH_TOKENS, SEQ_LEN)
     val_loader = DataLoader(f"{DATA_PATH}/fineweb_val_*.bin", VAL_BATCH_TOKENS, SEQ_LEN)
