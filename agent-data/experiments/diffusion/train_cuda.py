@@ -641,8 +641,16 @@ def main():
             torch.cuda.empty_cache()
         if step % CHECKPOINT_EVERY == 0 and step > 0:
             save_checkpoint(raw_model, split_opt, step, total_training_time, smooth_loss, train_loader)
-        if step > 5 and total_training_time >= TIME_BUDGET:
-            break
+        # Synchronized stop: rank 0 decides, broadcasts to all ranks
+        if IS_DDP:
+            stop = torch.tensor([1 if (step > 5 and total_training_time >= TIME_BUDGET) else 0],
+                                device=DEVICE, dtype=torch.int32)
+            dist.broadcast(stop, src=0)
+            if stop.item():
+                break
+        else:
+            if step > 5 and total_training_time >= TIME_BUDGET:
+                break
 
     # Eval on master only
     if IS_MASTER:
@@ -695,6 +703,7 @@ def main():
         print("=" * 50)
 
     if IS_DDP:
+        dist.barrier()  # wait for master to finish eval before destroying
         dist.destroy_process_group()
 
 
