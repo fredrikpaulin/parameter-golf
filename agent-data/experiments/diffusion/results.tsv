@@ -87,3 +87,4 @@ bert-mask-3600s	1.9413	worse	BERT-style masking (80/10/10), 3600s — train/eval
 8xH100-8L768d-65K-600s	1.7071	worse	8L/768d 12 heads (48.8M), 65K/gpu, 8xH100 10min, 2092 steps — depth too expensive, not enough steps
 8xH100-768d-accum2-600s	1.7070	same	6L/768d grad_accum=2 (524K eff), 8xH100 10min, 2740 steps — smooth loss 3.56 (much lower!) but BPB similar, needs more steps
 8xH100-768d-2xLR-600s	1.7598	worse	6L/768d 2x LR (0.04/0.04/0.06), 65K/gpu, 8xH100 10min — too aggressive, destabilized
+8xH100-768d-1.5xLR-600s	1.7321	worse	6L/768d 1.5x LR (0.03/0.03/0.045), 65K/gpu, 8xH100 10min — still too aggressive
