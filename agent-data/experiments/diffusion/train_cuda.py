@@ -20,6 +20,7 @@ Data layout (relative to repo root):
 """
 from __future__ import annotations
 
+import contextlib
 import gc
 import glob
 import json
@@ -57,7 +58,7 @@ TOKENIZER_PATH = str(REPO_ROOT / "data" / "tokenizers" / "fineweb_1024_bpe.model
 
 VOCAB_SIZE = 1024
 MASK_TOKEN_ID = VOCAB_SIZE
-NUM_LAYERS = 8
+NUM_LAYERS = 6
 MODEL_DIM = 768
 NUM_HEADS = 12
 MLP_MULT = 3
@@ -83,6 +84,7 @@ EMBED_LR = 0.03
 MUON_MOMENTUM = 0.95
 MUON_STEPS = 5
 GRAD_CLIP = 1.0
+GRAD_ACCUM = int(os.environ.get("GRAD_ACCUM", 1))
 CHECKPOINT_EVERY = 50_000
 CHECKPOINT_DIR = Path(__file__).resolve().parent / "checkpoints_cuda"
 
@@ -505,7 +507,7 @@ def main():
     bytes_per_token = build_bytes_per_token(sp)
 
     batch_size = TRAIN_BATCH_TOKENS // SEQ_LEN
-    eff_batch = TRAIN_BATCH_TOKENS * WORLD_SIZE
+    eff_batch = TRAIN_BATCH_TOKENS * WORLD_SIZE * GRAD_ACCUM
     log(f"DiffusionLM: {NUM_LAYERS}L dim={MODEL_DIM} heads={NUM_HEADS} "
         f"mlp={MLP_MULT}x seq={SEQ_LEN}")
     log(f"Batch: {batch_size}/gpu x {WORLD_SIZE} GPUs = {eff_batch} tokens/step")
@@ -549,43 +551,46 @@ def main():
     while step < MAX_ITERATIONS:
         t0 = time.time()
 
-        tokens = train_loader.next_batch()
         split_opt.zero_grad()
         _GLOBAL_STEP = step
 
-        # All ranks must use the same t_val for DDP gradient sync
-        if IS_DDP:
-            stratum = step % _N_STRATA
-            stride = (T_MAX - T_MIN) / _N_STRATA
-            t_lo = T_MIN + stratum * stride
-            t_hi = t_lo + stride
-            # Broadcast t from rank 0
-            t_tensor = torch.empty(1, device=DEVICE)
-            if IS_MASTER:
-                t_tensor.uniform_(t_lo, t_hi)
-            dist.broadcast(t_tensor, src=0)
-            t_val = float(t_tensor.item())
-            mask_prob = max(get_mask_prob(t_val), 0.01)
-            dalpha = get_dalpha_dt(t_val)
+        for accum_idx in range(GRAD_ACCUM):
+            tokens = train_loader.next_batch()
 
-            B, T = tokens.shape
-            mask = torch.rand(B, T, device=tokens.device) < mask_prob
-            masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
+            # All ranks must use the same t_val for DDP gradient sync
+            if IS_DDP:
+                stratum = (step * GRAD_ACCUM + accum_idx) % _N_STRATA
+                stride = (T_MAX - T_MIN) / _N_STRATA
+                t_lo = T_MIN + stratum * stride
+                t_hi = t_lo + stride
+                t_tensor = torch.empty(1, device=DEVICE)
+                if IS_MASTER:
+                    t_tensor.uniform_(t_lo, t_hi)
+                dist.broadcast(t_tensor, src=0)
+                t_val = float(t_tensor.item())
+                mask_prob = max(get_mask_prob(t_val), 0.01)
+                dalpha = get_dalpha_dt(t_val)
 
-            with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
-                logits = model(masked_tokens, t_val, mask=mask)
-                logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
-                targets_flat = tokens.reshape(-1)
-                per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none")
-                mask_flat = mask.reshape(-1).float()
-                avg_ce = (per_tok * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
-                loss_val = avg_ce * (dalpha / mask_prob)
+                B, T = tokens.shape
+                mask = torch.rand(B, T, device=tokens.device) < mask_prob
+                masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
 
-            loss_val.backward()
-        else:
-            with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE, enabled=(DEVICE.startswith("cuda"))):
-                loss_val = diffusion_loss(model, tokens)
-            loss_val.backward()
+                # Skip DDP allreduce on intermediate accum steps
+                ctx = model.no_sync if (IS_DDP and accum_idx < GRAD_ACCUM - 1) else contextlib.nullcontext
+                with ctx():
+                    with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
+                        logits = model(masked_tokens, t_val, mask=mask)
+                        logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
+                        targets_flat = tokens.reshape(-1)
+                        per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none")
+                        mask_flat = mask.reshape(-1).float()
+                        avg_ce = (per_tok * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
+                        loss_val = avg_ce * (dalpha / mask_prob) / GRAD_ACCUM
+                    loss_val.backward()
+            else:
+                with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE, enabled=(DEVICE.startswith("cuda"))):
+                    loss_val = diffusion_loss(model, tokens) / GRAD_ACCUM
+                loss_val.backward()
 
         # Gradient clipping
         all_params = list(raw_model.parameters())

@@ -84,3 +84,4 @@ bert-mask-3600s	1.9413	worse	BERT-style masking (80/10/10), 3600s — train/eval
 8xH100-768d-65K-600s	1.6999	BEST	6L/768d 65K tok/gpu (524K eff batch), 8xH100 10min, 2807 steps — bigger batch wins, first sub-1.70
 8xH100-768d-131K-600s	1.7181	worse	6L/768d 131K tok/gpu (1M eff batch), 8xH100 10min, 1501 steps — too few steps, batch too large for budget
 8xH100-1024d-65K-600s	1.7034	same	6L/1024d 16 heads (65M), 65K/gpu, 8xH100 10min, 2071 steps — lower loss/step but too few steps, matches 768d
+8xH100-8L768d-65K-600s	1.7071	worse	8L/768d 12 heads (48.8M), 65K/gpu, 8xH100 10min, 2092 steps — depth too expensive, not enough steps
