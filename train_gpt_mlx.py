@@ -78,7 +78,7 @@ class Hyperparameters:
     tied_embed_init_std: float = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
     logit_chunk_tokens: int = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
     logit_softcap: float = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
-    rope_base: float = float(os.environ.get("ROPE_BASE", 1000.0))
+    rope_base: float = float(os.environ.get("ROPE_BASE", 500.0))
     qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
 
     # Optimizer. We keep the same per-group defaults as train_gpt.py.
