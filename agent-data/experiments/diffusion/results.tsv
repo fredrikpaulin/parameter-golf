@@ -77,3 +77,4 @@ cosine-lr-3600s	1.9052	same	Cosine LR decay (was flat+warmdown), 3600s — withi
 beta-t-clamp10-3600s	1.9429	worse	Beta(2,5) t-sampling [0.02-0.80] + ELBO weight clamp 10, 3600s — 15% of steps wasted outside productive range
 bert-mask-3600s	1.9413	worse	BERT-style masking (80/10/10), 3600s — train/eval corruption mismatch, t=0.1 CE regressed badly
 6L-512d-21600s	1.7813	BEST	6L/512d 8 heads (16.8M), 6h, 136352 steps — capacity wins at longer budget, beats 384d 6h (1.80), NEW ALL-TIME 6h BEST
+8xH100-ddp-600s	1.7434	BEST	6L/512d 8 heads (16.8M), 8xH100 DDP 10min, 6905 steps, 262K tok/step — new all-time best, beats MLX 24h (1.7344)
