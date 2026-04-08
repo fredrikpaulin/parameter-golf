@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-Parameter Golf — Discrete Diffusion LM (PyTorch/CUDA).
-Best recipe port for H100 training. Same architecture, optimizer, and eval as MLX version.
+Parameter Golf — Discrete Diffusion LM (PyTorch/CUDA, DDP)
+Best recipe port for multi-GPU H100 training.
 
 Usage:
-    TIME_BUDGET=600 python3 -u train_cuda.py                # 10 min
-    TIME_BUDGET=3600 python3 -u train_cuda.py               # 1 hour
-    TIME_BUDGET=86400 bash run_long_cuda.sh                  # 24h with auto-restart
+    # Single GPU
+    TIME_BUDGET=600 python3 -u train_cuda.py
+
+    # Multi-GPU via torchrun
+    TIME_BUDGET=600 torchrun --standalone --nproc_per_node=8 train_cuda.py
+
+    # Override batch tokens per GPU
+    BATCH_TOKENS=32768 TIME_BUDGET=600 torchrun --standalone --nproc_per_node=8 train_cuda.py
 
 Data layout (relative to repo root):
     data/tokenizers/fineweb_1024_bpe.model
@@ -28,13 +33,20 @@ import sentencepiece as spm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 
 # ==============================================================================
 # CONFIG
 # ==============================================================================
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-# H100: use bf16 for compute, fp32 for master weights
+# DDP setup — works for both single-GPU and torchrun
+RANK = int(os.environ.get("RANK", 0))
+LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
+WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+IS_DDP = WORLD_SIZE > 1
+IS_MASTER = RANK == 0
+
+DEVICE = f"cuda:{LOCAL_RANK}" if torch.cuda.is_available() else "cpu"
 COMPUTE_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
 
 TIME_BUDGET = float(os.environ.get("TIME_BUDGET", 600.0))
@@ -57,7 +69,7 @@ SIGMA_MIN = 1e-4
 SIGMA_MAX = 20.0
 EVAL_ELBO_STEPS = 64
 
-# Training — larger batch for H100 (8x more memory than M-series)
+# Per-GPU batch size. Effective batch = TRAIN_BATCH_TOKENS * WORLD_SIZE
 TRAIN_BATCH_TOKENS = int(os.environ.get("BATCH_TOKENS", 32768))
 WARMUP_STEPS = 50
 WARMDOWN_FRAC = 0.15
@@ -71,6 +83,11 @@ MUON_STEPS = 5
 GRAD_CLIP = 1.0
 CHECKPOINT_EVERY = 50_000
 CHECKPOINT_DIR = Path(__file__).resolve().parent / "checkpoints_cuda"
+
+def log(msg):
+    """Print only on master rank."""
+    if IS_MASTER:
+        print(msg, flush=True)
 
 # ==============================================================================
 # NOISE SCHEDULE
@@ -112,26 +129,30 @@ def load_data_shard(path):
 
 
 class DataLoader:
-    def __init__(self, pattern, batch_tokens, seq_len):
+    def __init__(self, pattern, batch_tokens, seq_len, rank=0, world_size=1):
         self.files = sorted(glob.glob(pattern))
         if not self.files:
             raise FileNotFoundError(f"No shards matching {pattern}")
         self.batch_tokens = batch_tokens
         self.seq_len = seq_len
         self.batch_size = batch_tokens // seq_len
-        self.file_idx = 0
+        self.rank = rank
+        self.world_size = world_size
+        # Each rank starts at a different shard to avoid overlap
+        self.file_idx = rank % len(self.files)
         self.pos = 0
-        self.tokens = load_data_shard(self.files[0])
+        self.tokens = load_data_shard(self.files[self.file_idx])
 
     def reset(self):
-        self.file_idx = 0
+        self.file_idx = self.rank % len(self.files)
         self.pos = 0
-        self.tokens = load_data_shard(self.files[0])
+        self.tokens = load_data_shard(self.files[self.file_idx])
 
     def next_batch(self):
         needed = self.batch_size * self.seq_len + 1
         while self.pos + needed > len(self.tokens):
-            self.file_idx = (self.file_idx + 1) % len(self.files)
+            # Each rank advances by world_size shards to avoid overlap
+            self.file_idx = (self.file_idx + self.world_size) % len(self.files)
             self.tokens = load_data_shard(self.files[self.file_idx])
             self.pos = 0
         chunk = self.tokens[self.pos:self.pos + needed].astype(np.int32)
@@ -306,7 +327,7 @@ class SplitOptimizer:
             lr=SCALAR_LR, betas=(0.9, 0.95),
         )
 
-        print(f"  Muon keys: {len(self.matrix_params)}, Embed keys: {len(self.embed_params)}, Scalar keys: {len(self.scalar_params)}")
+        log(f"  Muon keys: {len(self.matrix_params)}, Embed keys: {len(self.embed_params)}, Scalar keys: {len(self.scalar_params)}")
 
     def zero_grad(self):
         for p in self.matrix_params.values():
@@ -334,6 +355,8 @@ class SplitOptimizer:
 # ==============================================================================
 
 def save_checkpoint(model, opt, step, total_training_time, smooth_loss, train_loader):
+    if not IS_MASTER:
+        return
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     torch.save({
         "model": model.state_dict(),
@@ -344,7 +367,7 @@ def save_checkpoint(model, opt, step, total_training_time, smooth_loss, train_lo
         "data_file_idx": train_loader.file_idx,
         "data_pos": train_loader.pos,
     }, str(CHECKPOINT_DIR / "checkpoint.pt"))
-    print(f"  [checkpoint saved at step {step}, time={total_training_time:.0f}s]")
+    log(f"  [checkpoint saved at step {step}, time={total_training_time:.0f}s]")
 
 
 def load_checkpoint(model, opt, train_loader):
@@ -357,7 +380,7 @@ def load_checkpoint(model, opt, train_loader):
     train_loader.file_idx = ckpt["data_file_idx"]
     train_loader.tokens = load_data_shard(train_loader.files[train_loader.file_idx])
     train_loader.pos = ckpt["data_pos"]
-    print(f"  [checkpoint loaded: step={ckpt['step']}, time={ckpt['total_training_time']:.0f}s]")
+    log(f"  [checkpoint loaded: step={ckpt['step']}, time={ckpt['total_training_time']:.0f}s]")
     return ckpt["step"], ckpt["total_training_time"], ckpt["smooth_loss"]
 
 # ==============================================================================
@@ -440,7 +463,7 @@ def compute_elbo_bpb(model, val_loader, bytes_per_token, num_steps, num_batches)
         total_weighted_nll += batch_nll * B * T
 
         if (batch_idx + 1) % 4 == 0:
-            print(f"  ELBO eval {batch_idx + 1}/{num_batches}")
+            log(f"  ELBO eval {batch_idx + 1}/{num_batches}")
 
     total_tokens = n_sequences * T
     avg_nll_nats = total_weighted_nll / total_tokens
@@ -453,55 +476,64 @@ def compute_elbo_bpb(model, val_loader, bytes_per_token, num_steps, num_batches)
 
 def main():
     t_start = time.time()
-    torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(42)
 
-    print(f"Device: {DEVICE}, dtype: {COMPUTE_DTYPE}")
-    if DEVICE == "cuda":
+    # DDP init
+    if IS_DDP:
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(LOCAL_RANK)
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
+    log(f"Device: {DEVICE}, dtype: {COMPUTE_DTYPE}, world_size: {WORLD_SIZE}")
+    if IS_MASTER and DEVICE.startswith("cuda"):
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
-            print(f"  GPU {i}: {torch.cuda.get_device_name(i)} ({props.total_memory / 1e9:.1f}GB)")
+            log(f"  GPU {i}: {torch.cuda.get_device_name(i)} ({props.total_memory / 1e9:.1f}GB)")
 
     sp = spm.SentencePieceProcessor()
     sp.load(TOKENIZER_PATH)
     bytes_per_token = build_bytes_per_token(sp)
 
     batch_size = TRAIN_BATCH_TOKENS // SEQ_LEN
-    print(f"DiffusionLM: {NUM_LAYERS}L dim={MODEL_DIM} heads={NUM_HEADS} "
-          f"mlp={MLP_MULT}x seq={SEQ_LEN} batch={batch_size} ({TRAIN_BATCH_TOKENS} tokens)")
-    print(f"Schedule: {NOISE_SCHEDULE} | ELBO steps: {EVAL_ELBO_STEPS} | Muon LR: {MATRIX_LR}")
-    print(f"Time budget: {TIME_BUDGET}s")
+    eff_batch = TRAIN_BATCH_TOKENS * WORLD_SIZE
+    log(f"DiffusionLM: {NUM_LAYERS}L dim={MODEL_DIM} heads={NUM_HEADS} "
+        f"mlp={MLP_MULT}x seq={SEQ_LEN}")
+    log(f"Batch: {batch_size}/gpu x {WORLD_SIZE} GPUs = {eff_batch} tokens/step")
+    log(f"Schedule: {NOISE_SCHEDULE} | ELBO steps: {EVAL_ELBO_STEPS} | Muon LR: {MATRIX_LR}")
+    log(f"Time budget: {TIME_BUDGET}s")
 
     for t_val in [0.0, 0.25, 0.5, 0.75, 1.0]:
         tv = max(min(t_val, 0.999), 0.001)
-        print(f"  t={t_val:.2f}: mask_prob={get_mask_prob(tv):.4f} dalpha_dt={get_dalpha_dt(tv):.4f}")
+        log(f"  t={t_val:.2f}: mask_prob={get_mask_prob(tv):.4f} dalpha_dt={get_dalpha_dt(tv):.4f}")
 
-    model = DiffusionLM(VOCAB_SIZE, MODEL_DIM, NUM_LAYERS, NUM_HEADS, MLP_MULT, SEQ_LEN)
-    model = model.to(DEVICE)
+    raw_model = DiffusionLM(VOCAB_SIZE, MODEL_DIM, NUM_LAYERS, NUM_HEADS, MLP_MULT, SEQ_LEN)
+    raw_model = raw_model.to(DEVICE)
 
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"Parameters: {num_params:,}")
+    num_params = sum(p.numel() for p in raw_model.parameters())
+    log(f"Parameters: {num_params:,}")
 
-    # torch.compile disabled — model is small and t_value changes each step,
-    # causing constant recompilation that's slower than eager mode
-    compiled = False
-    print("Running in eager mode (model too small for torch.compile overhead)")
-
-    train_loader = DataLoader(f"{DATA_PATH}/fineweb_train_*.bin", TRAIN_BATCH_TOKENS, SEQ_LEN)
+    # DDP data loaders — each rank reads different data
+    train_loader = DataLoader(f"{DATA_PATH}/fineweb_train_*.bin", TRAIN_BATCH_TOKENS, SEQ_LEN,
+                              rank=RANK, world_size=WORLD_SIZE)
     val_loader = DataLoader(f"{DATA_PATH}/fineweb_val_*.bin", VAL_BATCH_TOKENS, SEQ_LEN)
 
-    # Init optimizer before any wrapping
-    base_model = model._orig_mod if compiled else model
-    split_opt = SplitOptimizer(base_model)
+    # Optimizer on raw model (before DDP wrapping)
+    split_opt = SplitOptimizer(raw_model)
 
     total_training_time = 0.0
     step = 0
     smooth_loss = 0.0
 
-    ckpt = load_checkpoint(base_model, split_opt, train_loader)
+    ckpt = load_checkpoint(raw_model, split_opt, train_loader)
     if ckpt is not None:
         step, total_training_time, smooth_loss = ckpt
+
+    # Wrap with DDP after checkpoint load
+    if IS_DDP:
+        model = torch.nn.parallel.DistributedDataParallel(raw_model, device_ids=[LOCAL_RANK])
+    else:
+        model = raw_model
 
     global _GLOBAL_STEP
 
@@ -512,13 +544,41 @@ def main():
         split_opt.zero_grad()
         _GLOBAL_STEP = step
 
-        with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE, enabled=(DEVICE == "cuda")):
-            loss_val = diffusion_loss(model, tokens)
+        # All ranks must use the same t_val for DDP gradient sync
+        if IS_DDP:
+            stratum = step % _N_STRATA
+            t_lo = 0.1 + stratum * 0.05
+            t_hi = t_lo + 0.05
+            # Broadcast t from rank 0
+            t_tensor = torch.empty(1, device=DEVICE)
+            if IS_MASTER:
+                t_tensor.uniform_(t_lo, t_hi)
+            dist.broadcast(t_tensor, src=0)
+            t_val = float(t_tensor.item())
+            mask_prob = max(get_mask_prob(t_val), 0.01)
+            dalpha = get_dalpha_dt(t_val)
 
-        loss_val.backward()
+            B, T = tokens.shape
+            mask = torch.rand(B, T, device=tokens.device) < mask_prob
+            masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
+
+            with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
+                logits = model(masked_tokens, t_val, mask=mask)
+                logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
+                targets_flat = tokens.reshape(-1)
+                per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none")
+                mask_flat = mask.reshape(-1).float()
+                avg_ce = (per_tok * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
+                loss_val = avg_ce * (dalpha / mask_prob)
+
+            loss_val.backward()
+        else:
+            with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE, enabled=(DEVICE.startswith("cuda"))):
+                loss_val = diffusion_loss(model, tokens)
+            loss_val.backward()
 
         # Gradient clipping
-        all_params = list(base_model.parameters())
+        all_params = list(raw_model.parameters())
         grad_norm = torch.nn.utils.clip_grad_norm_(all_params, GRAD_CLIP).item()
 
         # LR schedule
@@ -540,7 +600,7 @@ def main():
             pg["lr"] = SCALAR_LR * lr_mul
         split_opt.adam_scalar.step()
 
-        # Muon step (manual)
+        # Muon step (manual, operates on raw_model params which DDP keeps in sync)
         with torch.no_grad():
             lr = MATRIX_LR * lr_mul
             for name, p in split_opt.matrix_params.items():
@@ -564,70 +624,73 @@ def main():
         remaining = max(0, TIME_BUDGET - total_training_time)
 
         if step % 20 == 0:
-            tok_s = TRAIN_BATCH_TOKENS / max(dt, 1e-6)
-            mem = f" | mem: {torch.cuda.memory_allocated() / 1e9:.1f}GB" if DEVICE == "cuda" else ""
-            print(f"step {step:05d} ({100 * progress:.1f}%) | loss: {debiased:.4f} | "
-                  f"gnorm: {grad_norm:.4f} | dt: {dt * 1000:.0f}ms | tok/s: {tok_s:,.0f} | "
-                  f"remaining: {remaining:.0f}s{mem}")
+            tok_s = eff_batch / max(dt, 1e-6)
+            mem = f" | mem: {torch.cuda.memory_allocated() / 1e9:.1f}GB" if DEVICE.startswith("cuda") else ""
+            log(f"step {step:05d} ({100 * progress:.1f}%) | loss: {debiased:.4f} | "
+                f"gnorm: {grad_norm:.4f} | dt: {dt * 1000:.0f}ms | tok/s: {tok_s:,.0f} | "
+                f"remaining: {remaining:.0f}s{mem}")
 
         step += 1
         if step % 5000 == 0:
             gc.collect()
-            if DEVICE == "cuda":
-                torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
         if step % CHECKPOINT_EVERY == 0 and step > 0:
-            save_checkpoint(base_model, split_opt, step, total_training_time, smooth_loss, train_loader)
+            save_checkpoint(raw_model, split_opt, step, total_training_time, smooth_loss, train_loader)
         if step > 5 and total_training_time >= TIME_BUDGET:
             break
 
-    # Per-t diagnostics
-    model.eval()
-    print("\n--- Per-t diagnostics ---")
-    val_loader.reset()
-    diag_tokens = val_loader.next_batch()
-    per_t_ces = {}
-    with torch.no_grad():
-        for t_diag in [0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9]:
-            mp = get_mask_prob(t_diag)
-            dmask = torch.rand(diag_tokens.shape, device=diag_tokens.device) < mp
-            masked = torch.where(dmask, MASK_TOKEN_ID, diag_tokens)
-            dlogits = model(masked, t_diag, mask=dmask)
-            dlogits_f = dlogits.reshape(-1, VOCAB_SIZE).float()
-            dtargets = diag_tokens.reshape(-1)
-            dce = F.cross_entropy(dlogits_f, dtargets, reduction="none")
-            dmask_f = dmask.reshape(-1).float()
-            n_m = dmask_f.sum().item()
-            avg_ce = (dce * dmask_f).sum().item() / n_m if n_m > 0 else 0.0
-            per_t_ces[t_diag] = avg_ce
-            print(f"  t={t_diag:.2f}: mask_prob={mp:.3f}, n_masked={int(n_m)}, avg_CE_masked={avg_ce:.4f}")
+    # Eval on master only
+    if IS_MASTER:
+        raw_model.eval()
+        print("\n--- Per-t diagnostics ---")
+        val_loader.reset()
+        diag_tokens = val_loader.next_batch()
+        per_t_ces = {}
+        with torch.no_grad():
+            for t_diag in [0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9]:
+                mp = get_mask_prob(t_diag)
+                dmask = torch.rand(diag_tokens.shape, device=diag_tokens.device) < mp
+                masked = torch.where(dmask, MASK_TOKEN_ID, diag_tokens)
+                dlogits = raw_model(masked, t_diag, mask=dmask)
+                dlogits_f = dlogits.reshape(-1, VOCAB_SIZE).float()
+                dtargets = diag_tokens.reshape(-1)
+                dce = F.cross_entropy(dlogits_f, dtargets, reduction="none")
+                dmask_f = dmask.reshape(-1).float()
+                n_m = dmask_f.sum().item()
+                avg_ce = (dce * dmask_f).sum().item() / n_m if n_m > 0 else 0.0
+                per_t_ces[t_diag] = avg_ce
+                print(f"  t={t_diag:.2f}: mask_prob={mp:.3f}, n_masked={int(n_m)}, avg_CE_masked={avg_ce:.4f}")
 
-    print(f"\nELBO eval ({EVAL_ELBO_STEPS} levels x 8 batches)...")
-    val_loader.reset()
-    val_bpb = compute_elbo_bpb(model, val_loader, bytes_per_token,
-                                num_steps=EVAL_ELBO_STEPS, num_batches=8)
+        print(f"\nELBO eval ({EVAL_ELBO_STEPS} levels x 8 batches)...")
+        val_loader.reset()
+        val_bpb = compute_elbo_bpb(raw_model, val_loader, bytes_per_token,
+                                    num_steps=EVAL_ELBO_STEPS, num_batches=8)
 
-    # Save final checkpoint
-    save_checkpoint(base_model, split_opt, step, total_training_time, smooth_loss, train_loader)
-    t_end = time.time()
-    print("---")
-    print(f"val_bpb:          {val_bpb:.6f}")
-    print(f"training_seconds: {total_training_time:.1f}")
-    print(f"total_seconds:    {t_end - t_start:.1f}")
-    print(f"num_steps:        {step}")
-    print(f"num_params_M:     {num_params / 1e6:.1f}")
-    print(f"model_dim:        {MODEL_DIM}")
-    print(f"num_layers:       {NUM_LAYERS}")
+        save_checkpoint(raw_model, split_opt, step, total_training_time, smooth_loss, train_loader)
+        t_end = time.time()
+        print("---")
+        print(f"val_bpb:          {val_bpb:.6f}")
+        print(f"training_seconds: {total_training_time:.1f}")
+        print(f"total_seconds:    {t_end - t_start:.1f}")
+        print(f"num_steps:        {step}")
+        print(f"num_params_M:     {num_params / 1e6:.1f}")
+        print(f"model_dim:        {MODEL_DIM}")
+        print(f"num_layers:       {NUM_LAYERS}")
+        print(f"world_size:       {WORLD_SIZE}")
 
-    # === COPY-PASTE SUMMARY ===
-    print("\n" + "=" * 50)
-    print("RUN SUMMARY — copy everything below this line")
-    print("=" * 50)
-    print(f"val_bpb: {val_bpb:.6f}")
-    print(f"steps: {step} | time: {total_training_time:.0f}s | params: {num_params / 1e6:.1f}M")
-    per_t_str = " | ".join(f"t{t}={ce:.2f}" for t, ce in sorted(per_t_ces.items()))
-    print(f"per-t: {per_t_str}")
-    print(f"final_smooth_loss: {debiased:.4f}")
-    print("=" * 50)
+        # === COPY-PASTE SUMMARY ===
+        print("\n" + "=" * 50)
+        print("RUN SUMMARY — copy everything below this line")
+        print("=" * 50)
+        print(f"val_bpb: {val_bpb:.6f}")
+        print(f"steps: {step} | time: {total_training_time:.0f}s | params: {num_params / 1e6:.1f}M | gpus: {WORLD_SIZE}")
+        per_t_str = " | ".join(f"t{t}={ce:.2f}" for t, ce in sorted(per_t_ces.items()))
+        print(f"per-t: {per_t_str}")
+        print(f"final_smooth_loss: {debiased:.4f}")
+        print("=" * 50)
+
+    if IS_DDP:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
