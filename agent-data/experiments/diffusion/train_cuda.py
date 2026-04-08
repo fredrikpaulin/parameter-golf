@@ -461,7 +461,7 @@ def main():
     if DEVICE == "cuda":
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
-            print(f"  GPU {i}: {torch.cuda.get_device_name(i)} ({props.total_mem / 1e9:.1f}GB)")
+            print(f"  GPU {i}: {torch.cuda.get_device_name(i)} ({props.total_memory / 1e9:.1f}GB)")
 
     sp = spm.SentencePieceProcessor()
     sp.load(TOKENIZER_PATH)
