@@ -74,7 +74,7 @@ EVAL_ELBO_STEPS = 64
 
 # Per-GPU batch size. Effective batch = TRAIN_BATCH_TOKENS * WORLD_SIZE
 TRAIN_BATCH_TOKENS = int(os.environ.get("BATCH_TOKENS", 32768))
-WARMUP_STEPS = 15
+WARMUP_STEPS = 50
 WARMDOWN_FRAC = 0.15
 MAX_ITERATIONS = 1_000_000
 VAL_BATCH_TOKENS = 4096
@@ -82,8 +82,10 @@ MATRIX_LR = 0.02
 SCALAR_LR = 0.02
 EMBED_LR = 0.03
 MUON_MOMENTUM = 0.95
-MUON_STEPS = 2
+MUON_STEPS = 3
 GRAD_CLIP = 1.0
+GUIDANCE_LAMBDA = 0.5
+GUIDANCE_T_RATIO = 0.3  # teacher sees t * this ratio (less masking)
 GRAD_ACCUM = int(os.environ.get("GRAD_ACCUM", 1))
 CHECKPOINT_EVERY = 50_000
 CHECKPOINT_DIR = Path(__file__).resolve().parent / "checkpoints_cuda"
@@ -575,6 +577,17 @@ def main():
                 mask = torch.rand(B, T, device=tokens.device) < mask_prob
                 masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
 
+                # Teacher pass (no_grad) at lower noise level
+                t_teacher = t_val * GUIDANCE_T_RATIO
+                mp_teacher = max(get_mask_prob(t_teacher), 0.005)
+                # Teacher uses a subset of the student's mask (less masking)
+                teacher_mask = mask & (torch.rand(B, T, device=tokens.device) < (mp_teacher / mask_prob))
+                teacher_masked = torch.where(teacher_mask, MASK_TOKEN_ID, tokens)
+                with torch.no_grad():
+                    with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
+                        teacher_logits = raw_model(teacher_masked, t_teacher, mask=teacher_mask)
+                        teacher_probs = F.softmax(teacher_logits.float(), dim=-1)
+
                 # Skip DDP allreduce on intermediate accum steps
                 ctx = model.no_sync if (IS_DDP and accum_idx < GRAD_ACCUM - 1) else contextlib.nullcontext
                 with ctx():
@@ -585,7 +598,15 @@ def main():
                         per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none")
                         mask_flat = mask.reshape(-1).float()
                         avg_ce = (per_tok * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
-                        loss_val = avg_ce * (dalpha / mask_prob) / GRAD_ACCUM
+                        elbo_loss = avg_ce * (dalpha / mask_prob)
+
+                        # Cross-t guidance: KL(teacher || student) on masked positions
+                        student_log_probs = F.log_softmax(logits.float(), dim=-1)
+                        # KL per token: sum over vocab
+                        kl_per_tok = (teacher_probs * (teacher_probs.clamp(min=1e-8).log() - student_log_probs)).sum(-1)
+                        kl_masked = (kl_per_tok * mask.float()).sum() / mask.float().sum().clamp(min=1.0)
+
+                        loss_val = (elbo_loss + GUIDANCE_LAMBDA * kl_masked) / GRAD_ACCUM
                     loss_val.backward()
             else:
                 with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE, enabled=(DEVICE.startswith("cuda"))):
