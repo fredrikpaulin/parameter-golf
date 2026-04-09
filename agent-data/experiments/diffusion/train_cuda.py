@@ -75,7 +75,7 @@ EVAL_ELBO_STEPS = 64
 # Per-GPU batch size. Effective batch = TRAIN_BATCH_TOKENS * WORLD_SIZE
 TRAIN_BATCH_TOKENS = int(os.environ.get("BATCH_TOKENS", 32768))
 WARMUP_STEPS = 50
-WARMDOWN_FRAC = 0.15
+WARMDOWN_FRAC = 0.10
 MAX_ITERATIONS = 1_000_000
 VAL_BATCH_TOKENS = 4096
 MATRIX_LR = 0.02
@@ -583,8 +583,7 @@ def main():
                         logits = model(masked_tokens, t_val, mask=mask)
                         logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
                         targets_flat = tokens.reshape(-1)
-                        per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none",
-                                                  label_smoothing=LABEL_SMOOTHING)
+                        per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none")
                         mask_flat = mask.reshape(-1).float()
                         avg_ce = (per_tok * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
                         loss_val = avg_ce * (dalpha / mask_prob) / GRAD_ACCUM
