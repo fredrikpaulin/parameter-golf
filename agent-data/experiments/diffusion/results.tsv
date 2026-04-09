@@ -90,3 +90,4 @@ bert-mask-3600s	1.9413	worse	BERT-style masking (80/10/10), 3600s — train/eval
 8xH100-768d-1.5xLR-600s	1.7321	worse	6L/768d 1.5x LR (0.03/0.03/0.045), 65K/gpu, 8xH100 10min — still too aggressive
 8xH100-768d-muon3-600s	1.6989	BEST	6L/768d Muon 3 NS iters (was 5), 65K/gpu, 8xH100 10min, 2874 steps — new best, sub-1.70!
 8xH100-768d-muon2-wu15-600s	1.7156	worse	6L/768d Muon 2 NS iters + warmup 15, 65K/gpu, 8xH100 10min — 2 iters not enough convergence
+8xH100-768d-guidance-600s	1.7744	worse	6L/768d cross-t self-guidance (λ=0.5, t_ratio=0.3), 65K/gpu, 8xH100 10min, 2157 steps — teacher fwd too expensive, -700 steps
