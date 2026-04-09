@@ -77,7 +77,7 @@ class Hyperparameters:
     tie_embeddings: bool = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     tied_embed_init_std: float = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
     logit_chunk_tokens: int = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
-    logit_softcap: float = float(os.environ.get("LOGIT_SOFTCAP", 20.0))
+    logit_softcap: float = float(os.environ.get("LOGIT_SOFTCAP", 18.0))
     rope_base: float = float(os.environ.get("ROPE_BASE", 75.0))
     qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
 
