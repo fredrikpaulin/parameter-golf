@@ -92,3 +92,4 @@ bert-mask-3600s	1.9413	worse	BERT-style masking (80/10/10), 3600s — train/eval
 8xH100-768d-muon2-wu15-600s	1.7156	worse	6L/768d Muon 2 NS iters + warmup 15, 65K/gpu, 8xH100 10min — 2 iters not enough convergence
 8xH100-768d-guidance-600s	1.7744	worse	6L/768d cross-t self-guidance (λ=0.5, t_ratio=0.3), 65K/gpu, 8xH100 10min, 2157 steps — teacher fwd too expensive, -700 steps
 8xH100-768d-labelsmooth-600s	aborted	worse	6L/768d label_smoothing=0.1 — loss 15-16 at 50%, smoothing + ELBO weighting catastrophic
+8xH100-768d-wd10-600s	1.7063	worse	6L/768d warmdown 10% (was 15%), 65K/gpu, 8xH100 10min — less warmdown slightly worse
