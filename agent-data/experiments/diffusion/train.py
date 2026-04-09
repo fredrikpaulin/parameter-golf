@@ -35,10 +35,10 @@ TOKENIZER_PATH = str(REPO_ROOT / "data" / "tokenizers" / "fineweb_1024_bpe.model
 
 VOCAB_SIZE = 1024
 MASK_TOKEN_ID = VOCAB_SIZE
-NUM_LAYERS = 6  # Unique layers
-NUM_LOOPS = 1   # Loop through layers this many times (effective depth = NUM_LAYERS * NUM_LOOPS)
-MODEL_DIM = 512
-NUM_HEADS = 8
+NUM_LAYERS = 6
+NUM_LOOPS = 1
+MODEL_DIM = 768
+NUM_HEADS = 12
 MLP_MULT = 3
 SEQ_LEN = 512
 LOGIT_SOFTCAP = 30.0
@@ -59,7 +59,7 @@ MATRIX_LR = 0.02
 SCALAR_LR = 0.02
 EMBED_LR = 0.03
 MUON_MOMENTUM = 0.95
-MUON_STEPS = 5
+MUON_STEPS = 3
 GRAD_CLIP = 1.0
 CHECKPOINT_EVERY = 100_000  # Save checkpoint every N steps to survive OOM at ~248K
 CHECKPOINT_DIR = Path(__file__).resolve().parent / "checkpoints"
@@ -100,6 +100,10 @@ def load_checkpoint(model, split_opt, train_loader):
         state = json.load(f)
     # Model weights
     data = np.load(str(CHECKPOINT_DIR / "model.npz"))
+    # Skip checkpoint if model architecture changed
+    if "embed.weight" in data and data["embed.weight"].shape[-1] != MODEL_DIM:
+        print(f"  [checkpoint skipped: dim mismatch, training from scratch]")
+        return None
     params = {k: mx.array(data[k]) for k in data.files}
     model.update(tree_unflatten(list(params.items())))
     mx.eval(model.parameters())
@@ -132,28 +136,6 @@ def clear_checkpoint():
 
 def rms_norm(x, eps=1e-6):
     return (x * mx.rsqrt(mx.mean(x * x, axis=-1, keepdims=True) + eps)).astype(x.dtype)
-
-
-def hadamard_transform(x):
-    """Fast Walsh-Hadamard transform on the last dimension.
-    Spreads energy evenly across dimensions, flattening outliers.
-    x shape: (..., d) where d must be a power of 2.
-    Returns: rotated x, normalized by 1/sqrt(d)."""
-    d = x.shape[-1]
-    orig_shape = x.shape
-    # Flatten leading dims: (*, d)
-    x = x.reshape(-1, d)
-    n = x.shape[0]
-    h = 1
-    while h < d:
-        # Reshape to (n, d/(2h), 2, h) for butterfly
-        x = x.reshape(n, d // (2 * h), 2, h)
-        a = x[:, :, 0, :] + x[:, :, 1, :]
-        b = x[:, :, 0, :] - x[:, :, 1, :]
-        x = mx.concatenate([a[:, :, None, :], b[:, :, None, :]], axis=2)
-        x = x.reshape(n, d)
-        h *= 2
-    return (x * (1.0 / math.sqrt(d))).reshape(orig_shape)
 
 
 def zeropower_newtonschulz5(g, steps=5, eps=1e-7):
@@ -428,39 +410,7 @@ class DiffusionLM(nn.Module):
         return logits
 
 
-_CURRICULUM_PROGRESS = 0.0  # Set by training loop
 _GLOBAL_STEP = 0  # For stratified t sampling
-
-# ==============================================================================
-# FREQUENCY-INFORMED MASKING
-# ==============================================================================
-
-def _build_token_mask_weights():
-    """Build per-token mask probability weights from token frequencies.
-    Rare tokens get higher weight (masked more often), common tokens lower.
-    Uses sqrt(1/freq) scaling, clamped and normalized so mean weight = 1.0."""
-    freq_path = REPO_ROOT / "data" / "token_freqs_1024.npy"
-    if not freq_path.exists():
-        print("  [no token_freqs_1024.npy found, using uniform masking]")
-        return None
-    freqs = np.load(str(freq_path))
-    # Replace zeros with min nonzero freq to avoid div-by-zero
-    nonzero = freqs[freqs > 0]
-    if len(nonzero) == 0:
-        return None
-    freqs = np.maximum(freqs, nonzero.min())
-    # sqrt(1/freq) — gentler than 1/freq, avoids extreme weights
-    weights = np.sqrt(1.0 / freqs)
-    # Normalize so mean = 1.0 (preserves expected number of masked tokens)
-    weights = weights / weights.mean()
-    # Clamp to [0.2, 5.0] to prevent extremes
-    weights = np.clip(weights, 0.2, 5.0)
-    weights = weights / weights.mean()  # re-normalize after clamp
-    print(f"  [freq-masking: weight range {weights.min():.2f}–{weights.max():.2f}, "
-          f"mean={weights.mean():.2f}]")
-    return mx.array(weights.astype(np.float32))
-
-_TOKEN_MASK_WEIGHTS = None  # Initialized in main()
 
 # ==============================================================================
 # TRAINING LOSS — Variable t, masked-only CE
@@ -630,8 +580,7 @@ def main():
 
         # LR schedule with warmup + cosine warmdown
         progress = min(total_training_time / TIME_BUDGET, 1.0)
-        global _CURRICULUM_PROGRESS, _GLOBAL_STEP
-        _CURRICULUM_PROGRESS = progress
+        global _GLOBAL_STEP
         _GLOBAL_STEP = step
         if progress > (1.0 - WARMDOWN_FRAC):
             lr_mul = (1.0 - progress) / WARMDOWN_FRAC

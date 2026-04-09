@@ -58,7 +58,7 @@ TOKENIZER_PATH = str(REPO_ROOT / "data" / "tokenizers" / "fineweb_1024_bpe.model
 
 VOCAB_SIZE = 1024
 MASK_TOKEN_ID = VOCAB_SIZE
-NUM_LAYERS = 7
+NUM_LAYERS = 6
 MODEL_DIM = 768
 NUM_HEADS = 12
 MLP_MULT = 3
