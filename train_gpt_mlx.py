@@ -410,7 +410,7 @@ class GPT(nn.Module):
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
         self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
-        xsa_layers = int(os.environ.get("XSA_LAYERS", 3))
+        xsa_layers = int(os.environ.get("XSA_LAYERS", 4))
         self.blocks = [
             Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init,
                   use_xsa=(i >= num_layers - xsa_layers))
