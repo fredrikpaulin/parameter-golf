@@ -419,18 +419,9 @@ class GPT(nn.Module):
     def __call__(self, input_ids: mx.array) -> mx.array:
         x = rms_norm(self.tok_emb(input_ids).astype(COMPUTE_DTYPE))
         x0 = x
-        skips: list[mx.array] = []
 
-        for i in range(self.num_encoder_layers):
+        for i in range(len(self.blocks)):
             x = self.blocks[i](x, x0)
-            skips.append(x)
-        for i in range(self.num_decoder_layers):
-            # Odd layer counts have one more decoder block than encoder block. The baseline only
-            # applies a skip connection when one exists, then runs the remaining decoder block(s)
-            # without an added skip.
-            if skips:
-                x = x + self.skip_weights[i].astype(x.dtype)[None, None, :] * skips.pop()
-            x = self.blocks[self.num_encoder_layers + i](x, x0)
         return self.final_norm(x)
 
     def loss(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
