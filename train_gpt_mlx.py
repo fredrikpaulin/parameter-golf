@@ -79,7 +79,7 @@ class Hyperparameters:
     logit_chunk_tokens: int = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
     logit_softcap: float = float(os.environ.get("LOGIT_SOFTCAP", 18.0))
     rope_base: float = float(os.environ.get("ROPE_BASE", 75.0))
-    qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
+    qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.0))
 
     # Optimizer. We keep the same per-group defaults as train_gpt.py.
     beta1: float = float(os.environ.get("BETA1", 0.9))
