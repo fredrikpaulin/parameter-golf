@@ -325,7 +325,7 @@ class CausalSelfAttention(nn.Module):
         self.rope = nn.RoPE(self.head_dim, traditional=False, base=rope_base)
         self.scale = self.head_dim ** -0.5
 
-    def __call__(self, x: mx.array) -> mx.array:
+    def __call__(self, x: mx.array, xsa: bool = False) -> mx.array:
         bsz, seqlen, dim = x.shape
         q = self.c_q(x).reshape(bsz, seqlen, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
         k = self.c_k(x).reshape(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(0, 2, 1, 3)
@@ -335,6 +335,15 @@ class CausalSelfAttention(nn.Module):
         k = self.rope(rms_norm(k).astype(COMPUTE_DTYPE))
         q = q * self.q_gain.astype(q.dtype)[None, :, None, None]
         y = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask="causal")
+        # XSA: subtract self-aligned component (v projected onto y direction)
+        if xsa:
+            # Expand v to match q head count for GQA
+            heads_per_kv = self.num_heads // self.num_kv_heads
+            v_expanded = mx.repeat(v, heads_per_kv, axis=1)  # (bsz, num_heads, seq, head_dim)
+            # Project out the component of y aligned with v (per-token self-exclusion)
+            dot = mx.sum(y * v_expanded, axis=-1, keepdims=True)
+            v_norm_sq = mx.sum(v_expanded * v_expanded, axis=-1, keepdims=True) + 1e-8
+            y = y - (dot / v_norm_sq) * v_expanded
         y = y.transpose(0, 2, 1, 3).reshape(bsz, seqlen, dim)
         return self.proj(y)
 
@@ -361,6 +370,7 @@ class Block(nn.Module):
         mlp_mult: int,
         rope_base: float,
         qk_gain_init: float,
+        use_xsa: bool = False,
     ):
         super().__init__()
         self.attn_norm = RMSNormNoWeight()
@@ -370,11 +380,12 @@ class Block(nn.Module):
         self.attn_scale = mx.ones((dim,), dtype=mx.float32)
         self.mlp_scale = mx.ones((dim,), dtype=mx.float32)
         self.resid_mix = mx.array(np.stack((np.ones((dim,), dtype=np.float32), np.zeros((dim,), dtype=np.float32))))
+        self.use_xsa = use_xsa
 
     def __call__(self, x: mx.array, x0: mx.array) -> mx.array:
         mix = self.resid_mix.astype(x.dtype)
         x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-        attn_out = self.attn(self.attn_norm(x))
+        attn_out = self.attn(self.attn_norm(x), xsa=self.use_xsa)
         x = x + self.attn_scale.astype(x.dtype)[None, None, :] * attn_out
         x = x + self.mlp_scale.astype(x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x))
         return x
@@ -399,8 +410,10 @@ class GPT(nn.Module):
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
         self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
+        xsa_layers = int(os.environ.get("XSA_LAYERS", 3))
         self.blocks = [
-            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
+            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init,
+                  use_xsa=(i >= num_layers - xsa_layers))
             for i in range(num_layers)
         ]
         self.final_norm = RMSNormNoWeight()
