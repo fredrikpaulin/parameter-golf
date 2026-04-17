@@ -52,12 +52,14 @@ COMPUTE_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.floa
 
 TIME_BUDGET = float(os.environ.get("TIME_BUDGET", 600.0))
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-DATA_PATH = str(REPO_ROOT / "data" / "datasets" / "fineweb10B_sp1024")
-TOKENIZER_PATH = str(REPO_ROOT / "data" / "tokenizers" / "fineweb_1024_bpe.model")
-
-VOCAB_SIZE = 1024
+VOCAB_SIZE = int(os.environ.get("VOCAB_SIZE", 1024))
 MASK_TOKEN_ID = VOCAB_SIZE
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_VOCAB_SUFFIX = {1024: "sp1024", 4096: "sp4096", 8192: "sp8192"}
+_DATA_DIR = _VOCAB_SUFFIX.get(VOCAB_SIZE, f"sp{VOCAB_SIZE}")
+DATA_PATH = os.environ.get("DATA_PATH", str(REPO_ROOT / "data" / "datasets" / f"fineweb10B_{_DATA_DIR}"))
+TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", str(REPO_ROOT / "data" / "tokenizers" / f"fineweb_{VOCAB_SIZE}_bpe.model"))
 NUM_LAYERS = 6
 MODEL_DIM = 768
 NUM_HEADS = 12
@@ -73,7 +75,7 @@ SIGMA_MAX = 20.0
 EVAL_ELBO_STEPS = 64
 
 # Per-GPU batch size. Effective batch = TRAIN_BATCH_TOKENS * WORLD_SIZE
-TRAIN_BATCH_TOKENS = int(os.environ.get("BATCH_TOKENS", 32768))
+TRAIN_BATCH_TOKENS = int(os.environ.get("BATCH_TOKENS", 24576))
 WARMUP_STEPS = 50
 WARMDOWN_FRAC = 0.15
 MAX_ITERATIONS = 1_000_000
@@ -133,7 +135,18 @@ def load_data_shard(path):
     return np.fromfile(path, dtype="<u2", offset=256 * 4, count=ntok)
 
 
+def _find_coprime(n, start=7919):
+    """Find a number coprime to n, starting from start."""
+    from math import gcd
+    c = start
+    while gcd(c, n) != 1:
+        c += 1
+    return c
+
 class DataLoader:
+    """Coprime-stride data loader: jumps through the shard by a large coprime
+    stride so consecutive batches come from different documents/regions.
+    Reduces correlation between nearby minibatches."""
     def __init__(self, pattern, batch_tokens, seq_len, rank=0, world_size=1):
         self.files = sorted(glob.glob(pattern))
         if not self.files:
@@ -143,28 +156,44 @@ class DataLoader:
         self.batch_size = batch_tokens // seq_len
         self.rank = rank
         self.world_size = world_size
-        # Each rank starts at a different shard to avoid overlap
         self.file_idx = rank % len(self.files)
-        self.pos = 0
         self.tokens = load_data_shard(self.files[self.file_idx])
+        self._init_stride()
+        self.pos = 0
+
+    def _init_stride(self):
+        """Compute coprime stride for current shard."""
+        chunk_size = self.batch_size * self.seq_len
+        n_chunks = max(1, len(self.tokens) // chunk_size)
+        self.stride = _find_coprime(n_chunks) if n_chunks > 1 else 1
+        self.n_chunks = n_chunks
+        self.chunk_idx = 0
 
     def reset(self):
         self.file_idx = self.rank % len(self.files)
-        self.pos = 0
         self.tokens = load_data_shard(self.files[self.file_idx])
+        self._init_stride()
+        self.pos = 0
+        self.chunk_idx = 0
 
     def next_batch(self):
-        needed = self.batch_size * self.seq_len + 1
-        while self.pos + needed > len(self.tokens):
-            # Each rank advances by world_size shards to avoid overlap
+        chunk_size = self.batch_size * self.seq_len
+        # Advance to next shard if we've visited all chunks
+        if self.chunk_idx >= self.n_chunks:
             self.file_idx = (self.file_idx + self.world_size) % len(self.files)
             self.tokens = load_data_shard(self.files[self.file_idx])
-            self.pos = 0
-        chunk = self.tokens[self.pos:self.pos + needed].astype(np.int32)
-        self.pos += self.batch_size * self.seq_len
+            self._init_stride()
+            self.chunk_idx = 0
+        # Coprime stride through the shard
+        offset = (self.chunk_idx * self.stride % self.n_chunks) * chunk_size
+        # Fallback if near end of shard
+        if offset + chunk_size > len(self.tokens):
+            offset = 0
+        chunk = self.tokens[offset:offset + chunk_size].astype(np.int32)
+        self.chunk_idx += 1
+        self.pos = offset + chunk_size
         buf = torch.from_numpy(chunk).to(DEVICE, dtype=torch.long)
-        x = buf[:self.batch_size * self.seq_len].reshape(self.batch_size, self.seq_len)
-        return x
+        return buf.reshape(self.batch_size, self.seq_len)
 
 
 def build_bytes_per_token(sp):
@@ -381,10 +410,12 @@ def load_checkpoint(model, opt, train_loader):
         return None
     ckpt = torch.load(str(ckpt_path), map_location=DEVICE, weights_only=False)
     # Skip checkpoint if model architecture changed (e.g. different dim or seq_len)
-    ckpt_dim = ckpt["model"].get("embed.weight", torch.empty(0,0)).shape[-1]
+    ckpt_embed = ckpt["model"].get("embed.weight", torch.empty(0,0))
+    ckpt_dim = ckpt_embed.shape[-1] if ckpt_embed.ndim == 2 else 0
+    ckpt_vocab = ckpt_embed.shape[0] if ckpt_embed.ndim == 2 else 0
     ckpt_seq = ckpt["model"].get("_rope_cos", torch.empty(0,0)).shape[0]
-    if ckpt_dim != MODEL_DIM or ckpt_seq != SEQ_LEN:
-        log(f"  [checkpoint skipped: dim={ckpt_dim}/seq={ckpt_seq} vs {MODEL_DIM}/{SEQ_LEN}, training from scratch]")
+    if ckpt_dim != MODEL_DIM or ckpt_seq != SEQ_LEN or ckpt_vocab != VOCAB_SIZE + 1:
+        log(f"  [checkpoint skipped: dim={ckpt_dim}/seq={ckpt_seq}/vocab={ckpt_vocab} vs {MODEL_DIM}/{SEQ_LEN}/{VOCAB_SIZE+1}, training from scratch]")
         return None
     model.load_state_dict(ckpt["model"])
     opt.load_state_dict(ckpt["optimizer"])

@@ -55,15 +55,39 @@ Muon (Newton-Schulz orthogonalization for 2D weight matrices, Adam for embedding
 - **Larger batch** — Fewer steps hurt more than larger batch helps.
 - **seq_len=1024** — Slower per step, fewer total steps at same time budget. Revisit with longer training.
 
+## H100 Proxy Experiment (standard run on 2x5080)
+
+The challenge scores a 10-min run on 8xH100. We approximate that locally with
+a **proxy run** on 2xRTX 5080: match the H100 effective batch (524K tokens)
+and scale wall-time by the observed throughput ratio.
+
+Empirical throughput on 6L/768d:
+- 8xH100 (BF16, DDP): ~2.51M tok/s aggregate
+- 2xRTX 5080 (BF16, DDP): ~0.18M tok/s aggregate
+- Ratio: **~14x**, close to the ~17.6x theoretical BF16 tensor-TFLOPS ratio.
+
+**Standard proxy run:** `bash run_h100_proxy.sh`
+- VOCAB_SIZE=8192, BATCH_TOKENS=16384/gpu, GRAD_ACCUM=16 → 524,288 tok/step
+- TIME_BUDGET=8400s (~2h 20min) → ~2500-2900 optimizer steps
+- Predicts the BPB a 10-min 8xH100 run of the same recipe would land near.
+
+**Interpretation:**
+- Proxy BPB ≈ real 10-min 8xH100 BPB ± small noise (same optimizer trajectory).
+- Our 6h/24h "ceiling" runs at 32K eff batch read LOWER than H100 would —
+  they benefit from many-more-steps-at-smaller-batch, not from raw compute.
+- If a change helps the proxy, it likely helps the real H100 run. If it only
+  helps the small-batch ceiling run, it may not transfer.
+
 ## Experiment Protocol
 
 1. Make ONE change at a time
 2. Test at 120s first (`TIME_BUDGET=120`)
 3. Compare 120s BPB to baseline (~2.46 at 120s with QK-norm)
 4. If promising, run full 3600s (`TIME_BUDGET=3600`)
-5. Log to results.tsv: `tag\tval_bpb\tstatus\tdescription`
-6. If better: keep change, commit with `git add -f agent-data/experiments/diffusion/ && git commit`
-7. If worse: revert train.py
+5. For H100-relevance signal, run `bash run_h100_proxy.sh` (~2h 20min)
+6. Log to results.tsv: `tag\tval_bpb\tstatus\tdescription`
+7. If better: keep change, commit with `git add -f agent-data/experiments/diffusion/ && git commit`
+8. If worse: revert train.py
 
 ## Run Command
 

@@ -94,3 +94,8 @@ bert-mask-3600s	1.9413	worse	BERT-style masking (80/10/10), 3600s — train/eval
 8xH100-768d-labelsmooth-600s	aborted	worse	6L/768d label_smoothing=0.1 — loss 15-16 at 50%, smoothing + ELBO weighting catastrophic
 8xH100-768d-wd10-600s	1.7063	worse	6L/768d warmdown 10% (was 15%), 65K/gpu, 8xH100 10min — less warmdown slightly worse
 8xH100-7L768d-65K-600s	1.7067	worse	7L/768d (42.9M), 65K/gpu, 8xH100 10min, 2483 steps — extra layer too expensive for budget
+2x5080-768d-sp1024-12h	1.6169	BEST	6L/768d SP1024, 2x5080 DDP 12h, 159K steps — new best, first 5080 result
+2x5080-768d-sp1024-24h	1.6007	BEST	6L/768d SP1024, 2x5080 DDP 24h, 318K steps — sub-1.60, continued from 12h checkpoint
+2x5080-768d-sp4096-60s	2.2753	test	6L/768d SP4096 (41.7M), 2x5080 60s, 219 steps — SP4096 baseline
+2x5080-768d-sp4096-2h	1.5348	BEST	6L/768d SP4096 (41.7M), 2x5080 2h, 25516 steps — bigger vocab huge win, beats SP1024 24h in 2h
+2x5080-768d-sp8192-6h	1.4472	BEST	6L/768d SP8192 (48.0M), 2x5080 6h, 106K steps, 16K tok/gpu — NEW ALL-TIME BEST, t=0.10 CE=1.01 below AR baseline
