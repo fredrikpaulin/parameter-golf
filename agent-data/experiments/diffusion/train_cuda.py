@@ -68,7 +68,7 @@ SEQ_LEN = 512
 LOGIT_SOFTCAP = 30.0
 
 T_MIN = 0.1
-T_MAX = 0.5
+T_MAX = 0.6
 NOISE_SCHEDULE = "cosine"
 SIGMA_MIN = 1e-4
 SIGMA_MAX = 20.0
@@ -119,6 +119,15 @@ def get_dalpha_dt(t, dt=1e-5):
     a_hi = get_mask_prob(min(t + dt, 1.0))
     a_lo = get_mask_prob(max(t - dt, 0.0))
     return (a_hi - a_lo) / (2 * dt)
+
+def alpha_to_t(alpha, s=0.008):
+    """Invert the cosine schedule: given alpha in [0,1], return t in [0,1]."""
+    f0 = math.cos(s / (1 + s) * math.pi / 2) ** 2
+    val = (1.0 - alpha) * f0
+    val = max(0.0, min(1.0, val))
+    arg = math.acos(math.sqrt(val))
+    t = (1 + s) * (2 / math.pi) * arg - s
+    return max(0.0, min(1.0, t))
 
 # ==============================================================================
 # HELPERS
@@ -431,18 +440,23 @@ def load_checkpoint(model, opt, train_loader):
 
 _N_STRATA = 8
 _GLOBAL_STEP = 0
+_ALPHA_MIN = get_mask_prob(T_MIN)
+_ALPHA_MAX = get_mask_prob(T_MAX)
 
 def diffusion_loss(model, tokens):
+    # Alpha-uniform stratified sampling: q(t) ∝ dalpha/dt, so the ELBO
+    # importance weight collapses from (dalpha/mask_prob) to (1/mask_prob).
+    # This matches training density to where BPB mass actually lives.
     global _GLOBAL_STEP
     B, T = tokens.shape
 
     stratum = _GLOBAL_STEP % _N_STRATA
-    stride = (T_MAX - T_MIN) / _N_STRATA
-    t_lo = T_MIN + stratum * stride
-    t_hi = t_lo + stride
-    t_val = float(torch.empty(1).uniform_(t_lo, t_hi).item())
-    mask_prob = max(get_mask_prob(t_val), 0.01)
-    dalpha = get_dalpha_dt(t_val)
+    stride = (_ALPHA_MAX - _ALPHA_MIN) / _N_STRATA
+    a_lo = _ALPHA_MIN + stratum * stride
+    a_hi = a_lo + stride
+    alpha_val = float(torch.empty(1).uniform_(a_lo, a_hi).item())
+    t_val = alpha_to_t(alpha_val)
+    mask_prob = max(alpha_val, 0.01)
 
     mask = torch.rand(B, T, device=tokens.device) < mask_prob
     masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
@@ -454,7 +468,7 @@ def diffusion_loss(model, tokens):
     per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none")
     mask_flat = mask.reshape(-1).float()
     avg_ce = (per_tok * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
-    return avg_ce * (dalpha / mask_prob)
+    return avg_ce / mask_prob
 
 # ==============================================================================
 # ELBO EVALUATION
@@ -591,17 +605,18 @@ def main():
 
             # All ranks must use the same t_val for DDP gradient sync
             if IS_DDP:
+                # Alpha-uniform stratified sampling (see diffusion_loss for rationale)
                 stratum = (step * GRAD_ACCUM + accum_idx) % _N_STRATA
-                stride = (T_MAX - T_MIN) / _N_STRATA
-                t_lo = T_MIN + stratum * stride
-                t_hi = t_lo + stride
-                t_tensor = torch.empty(1, device=DEVICE)
+                stride = (_ALPHA_MAX - _ALPHA_MIN) / _N_STRATA
+                a_lo = _ALPHA_MIN + stratum * stride
+                a_hi = a_lo + stride
+                a_tensor = torch.empty(1, device=DEVICE)
                 if IS_MASTER:
-                    t_tensor.uniform_(t_lo, t_hi)
-                dist.broadcast(t_tensor, src=0)
-                t_val = float(t_tensor.item())
-                mask_prob = max(get_mask_prob(t_val), 0.01)
-                dalpha = get_dalpha_dt(t_val)
+                    a_tensor.uniform_(a_lo, a_hi)
+                dist.broadcast(a_tensor, src=0)
+                alpha_val = float(a_tensor.item())
+                t_val = alpha_to_t(alpha_val)
+                mask_prob = max(alpha_val, 0.01)
 
                 B, T = tokens.shape
                 mask = torch.rand(B, T, device=tokens.device) < mask_prob
@@ -617,7 +632,7 @@ def main():
                         per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none")
                         mask_flat = mask.reshape(-1).float()
                         avg_ce = (per_tok * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
-                        loss_val = avg_ce * (dalpha / mask_prob) / GRAD_ACCUM
+                        loss_val = avg_ce / mask_prob / GRAD_ACCUM
                     loss_val.backward()
             else:
                 with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE, enabled=(DEVICE.startswith("cuda"))):
