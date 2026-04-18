@@ -63,7 +63,7 @@ TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", str(REPO_ROOT / "data" / "toke
 NUM_LAYERS = 6
 MODEL_DIM = 768
 NUM_HEADS = 12
-MLP_MULT = 4
+MLP_MULT = 3
 SEQ_LEN = 512
 LOGIT_SOFTCAP = 30.0
 
@@ -304,9 +304,11 @@ class DiffusionLM(nn.Module):
         self.register_buffer("_rope_sin", rope_sin)
         self.t_embed = nn.Linear(1, dim, bias=True)
 
-    def forward(self, x_noised, t_value, mask=None):
+    def forward(self, x_noised, t_value, mask=None, sc_emb=None):
         B, T = x_noised.shape
         h = self.embed(x_noised)
+        if sc_emb is not None:
+            h = h + sc_emb  # partial self-conditioning, fixed gate = 1.0
 
         t_scalar = torch.tensor([[t_value]], device=x_noised.device, dtype=h.dtype)
         t_bias = self.t_embed(t_scalar)
@@ -461,7 +463,17 @@ def diffusion_loss(model, tokens):
     mask = torch.rand(B, T, device=tokens.device) < mask_prob
     masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
 
-    logits = model(masked_tokens, t_val, mask=mask)
+    # Partial self-conditioning: 1 in 3 steps do a detached teacher pass
+    sc_emb = None
+    if _GLOBAL_STEP % 3 == 0:
+        with torch.no_grad():
+            logits_pass1 = model(masked_tokens, t_val, mask=mask, sc_emb=None)
+        probs = F.softmax(logits_pass1.float(), dim=-1)
+        # Expected embedding under predicted distribution (real vocab only)
+        embed_w = model.embed.weight[:VOCAB_SIZE] if hasattr(model, "embed") else model.module.embed.weight[:VOCAB_SIZE]
+        sc_emb = (probs @ embed_w).detach().to(masked_tokens.device)
+
+    logits = model(masked_tokens, t_val, mask=mask, sc_emb=sc_emb)
     logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
     targets_flat = tokens.reshape(-1)
 
@@ -502,7 +514,13 @@ def compute_elbo_bpb(model, val_loader, bytes_per_token, num_steps, num_batches)
             mask_prob = max(get_mask_prob(t_mid), 0.005)
             mask = torch.rand(B, T, device=tokens.device) < mask_prob
             masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
-            logits = model(masked_tokens, t_mid, mask=mask)
+
+            # Always-2-pass at eval: model trained to use sc on 1/3 of steps,
+            # we want the "with sc" behaviour at eval.
+            logits_pass1 = model(masked_tokens, t_mid, mask=mask, sc_emb=None)
+            probs = F.softmax(logits_pass1.float(), dim=-1)
+            sc_emb = (probs @ model.embed.weight[:VOCAB_SIZE]).to(logits_pass1.dtype)
+            logits = model(masked_tokens, t_mid, mask=mask, sc_emb=sc_emb)
 
             logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
             targets_flat = tokens.reshape(-1)
@@ -622,11 +640,23 @@ def main():
                 mask = torch.rand(B, T, device=tokens.device) < mask_prob
                 masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
 
+                # Partial self-conditioning: 1 in 3 steps do a detached teacher pass.
+                # Deterministic per (step, accum_idx) so all DDP ranks agree.
+                # Use raw_model (not DDP-wrapped) for the teacher pass — no grad, no allreduce.
+                use_sc = ((step * GRAD_ACCUM + accum_idx) % 3 == 0)
+                sc_emb = None
+                if use_sc:
+                    with torch.no_grad():
+                        with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
+                            logits_pass1 = raw_model(masked_tokens, t_val, mask=mask, sc_emb=None)
+                    probs = F.softmax(logits_pass1.float(), dim=-1)
+                    sc_emb = (probs @ raw_model.embed.weight[:VOCAB_SIZE]).detach().to(COMPUTE_DTYPE)
+
                 # Skip DDP allreduce on intermediate accum steps
                 ctx = model.no_sync if (IS_DDP and accum_idx < GRAD_ACCUM - 1) else contextlib.nullcontext
                 with ctx():
                     with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
-                        logits = model(masked_tokens, t_val, mask=mask)
+                        logits = model(masked_tokens, t_val, mask=mask, sc_emb=sc_emb)
                         logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
                         targets_flat = tokens.reshape(-1)
                         per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none")
@@ -721,7 +751,11 @@ def main():
                 mp = get_mask_prob(t_diag)
                 dmask = torch.rand(diag_tokens.shape, device=diag_tokens.device) < mp
                 masked = torch.where(dmask, MASK_TOKEN_ID, diag_tokens)
-                dlogits = raw_model(masked, t_diag, mask=dmask)
+                # 2-pass eval with self-conditioning
+                dlogits_p1 = raw_model(masked, t_diag, mask=dmask, sc_emb=None)
+                dprobs = F.softmax(dlogits_p1.float(), dim=-1)
+                dsc_emb = (dprobs @ raw_model.embed.weight[:VOCAB_SIZE]).to(dlogits_p1.dtype)
+                dlogits = raw_model(masked, t_diag, mask=dmask, sc_emb=dsc_emb)
                 dlogits_f = dlogits.reshape(-1, VOCAB_SIZE).float()
                 dtargets = diag_tokens.reshape(-1)
                 dce = F.cross_entropy(dlogits_f, dtargets, reduction="none")

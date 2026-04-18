@@ -11,3 +11,7 @@ data/docs_selected.jsonl
 logs/
 solutions/
 agent-data/
+agent-data/experiments/diffusion/checkpoints
+agent-data/experiments/diffusion/checkpoints/state.json
+agent-data/experiments/diffusion/checkpoints/muon_bufs.npz
+agent-data/experiments/diffusion/checkpoints/model.npz
