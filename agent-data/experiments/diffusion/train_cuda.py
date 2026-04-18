@@ -351,9 +351,9 @@ class SplitOptimizer:
         self.scalar_params = {}
 
         for name, p in model.named_parameters():
-            if p.ndim == 2 and "embed" not in name and "t_embed" not in name:
+            if p.ndim == 2 and "embed" not in name and "t_embed" not in name and "out_head" not in name:
                 self.matrix_params[name] = p
-            elif "embed" in name and p.ndim == 2:
+            elif ("embed" in name or "out_head" in name) and p.ndim == 2:
                 self.embed_params[name] = p
             else:
                 self.scalar_params[name] = p
@@ -672,10 +672,6 @@ def main():
                 split_opt.muon_bufs[name] = buf
                 g_eff = g + MUON_MOMENTUM * buf
                 g_ortho = zeropower_newtonschulz5(g_eff, MUON_STEPS)
-                # Muon+ col_row post-polar normalization (arXiv 2602.21545).
-                # Divide each column by its L2 norm, then each row by its L2 norm.
-                g_ortho = g_ortho / torch.sqrt((g_ortho * g_ortho).sum(dim=-2, keepdim=True) + 1e-7)
-                g_ortho = g_ortho / torch.sqrt((g_ortho * g_ortho).sum(dim=-1, keepdim=True) + 1e-7)
                 scale = math.sqrt(max(1.0, p.shape[0] / p.shape[1]))
                 p.add_(g_ortho * scale, alpha=-lr)
 
