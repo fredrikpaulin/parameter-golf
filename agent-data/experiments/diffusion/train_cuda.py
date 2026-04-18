@@ -672,6 +672,10 @@ def main():
                 split_opt.muon_bufs[name] = buf
                 g_eff = g + MUON_MOMENTUM * buf
                 g_ortho = zeropower_newtonschulz5(g_eff, MUON_STEPS)
+                # Muon+ col_row post-polar normalization (arXiv 2602.21545).
+                # Divide each column by its L2 norm, then each row by its L2 norm.
+                g_ortho = g_ortho / torch.sqrt((g_ortho * g_ortho).sum(dim=-2, keepdim=True) + 1e-7)
+                g_ortho = g_ortho / torch.sqrt((g_ortho * g_ortho).sum(dim=-1, keepdim=True) + 1e-7)
                 scale = math.sqrt(max(1.0, p.shape[0] / p.shape[1]))
                 p.add_(g_ortho * scale, alpha=-lr)
 
