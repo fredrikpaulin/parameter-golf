@@ -351,9 +351,9 @@ class SplitOptimizer:
         self.scalar_params = {}
 
         for name, p in model.named_parameters():
-            if p.ndim == 2 and "embed" not in name and "t_embed" not in name and "out_head" not in name:
+            if p.ndim == 2 and "embed" not in name and "t_embed" not in name:
                 self.matrix_params[name] = p
-            elif ("embed" in name or "out_head" in name) and p.ndim == 2:
+            elif "embed" in name and p.ndim == 2:
                 self.embed_params[name] = p
             else:
                 self.scalar_params[name] = p
