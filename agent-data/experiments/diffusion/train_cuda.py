@@ -474,7 +474,15 @@ def diffusion_loss(model, tokens):
     if use_sc:
         with torch.no_grad():
             t_logits = model(masked_tokens, t_val, mask=mask)
-            sc_emb = F.softmax(t_logits.float(), dim=-1) @ model.embed.weight[:VOCAB_SIZE].float()
+            # Chunked bf16 softmax @ embed — avoids a (B, T, V) fp32 allocation
+            # that OOMs at SP16384. bf16 is fine: sc_emb is a weak input
+            # perturbation, not a gradient path.
+            embed_ct = model.embed.weight[:VOCAB_SIZE].to(t_logits.dtype)
+            sc_emb = torch.empty(B, T, MODEL_DIM, device=t_logits.device, dtype=t_logits.dtype)
+            for i in range(0, T, 128):
+                j = min(i + 128, T)
+                sc_emb[:, i:j, :] = F.softmax(t_logits[:, i:j, :], dim=-1) @ embed_ct
+            del t_logits
 
     logits = model(masked_tokens, t_val, mask=mask, sc_emb=sc_emb)
     logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
@@ -518,8 +526,14 @@ def compute_elbo_bpb(model, val_loader, bytes_per_token, num_steps, num_batches)
             mask = torch.rand(B, T, device=tokens.device) < mask_prob
             masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
             # Always-2-pass at eval: teacher → sc_emb → student.
+            # Chunked bf16 softmax @ embed (matches training path).
             t_logits = model(masked_tokens, t_mid, mask=mask)
-            sc_emb = F.softmax(t_logits.float(), dim=-1) @ model.embed.weight[:VOCAB_SIZE].float()
+            embed_ct = model.embed.weight[:VOCAB_SIZE].to(t_logits.dtype)
+            sc_emb = torch.empty(B, T, MODEL_DIM, device=t_logits.device, dtype=t_logits.dtype)
+            for i in range(0, T, 128):
+                j = min(i + 128, T)
+                sc_emb[:, i:j, :] = F.softmax(t_logits[:, i:j, :], dim=-1) @ embed_ct
+            del t_logits
             logits = model(masked_tokens, t_mid, mask=mask, sc_emb=sc_emb)
 
             logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
@@ -651,7 +665,16 @@ def main():
                     with torch.no_grad():
                         with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
                             t_logits = raw_model(masked_tokens, t_val, mask=mask)
-                        sc_emb = F.softmax(t_logits.float(), dim=-1) @ raw_model.embed.weight[:VOCAB_SIZE].float()
+                        # Chunked bf16 softmax @ embed — avoids a (B, T, V) fp32
+                        # allocation that OOMs the 16GB 5080 at SP16384. bf16 is
+                        # fine here: sc_emb is a weak input perturbation, not a
+                        # gradient path.
+                        embed_ct = raw_model.embed.weight[:VOCAB_SIZE].to(t_logits.dtype)
+                        sc_emb = torch.empty(B, T, MODEL_DIM, device=t_logits.device, dtype=t_logits.dtype)
+                        for i in range(0, T, 128):
+                            j = min(i + 128, T)
+                            sc_emb[:, i:j, :] = F.softmax(t_logits[:, i:j, :], dim=-1) @ embed_ct
+                        del t_logits
 
                 # Skip DDP allreduce on intermediate accum steps
                 ctx = model.no_sync if (IS_DDP and accum_idx < GRAD_ACCUM - 1) else contextlib.nullcontext
@@ -753,8 +776,15 @@ def main():
                 dmask = torch.rand(diag_tokens.shape, device=diag_tokens.device) < mp
                 masked = torch.where(dmask, MASK_TOKEN_ID, diag_tokens)
                 # Always-2-pass at eval: teacher → sc_emb → student.
+                # Chunked bf16 softmax @ embed (matches training path).
                 t_logits = raw_model(masked, t_diag, mask=dmask)
-                sc_emb = F.softmax(t_logits.float(), dim=-1) @ raw_model.embed.weight[:VOCAB_SIZE].float()
+                dB, dT = masked.shape
+                embed_ct = raw_model.embed.weight[:VOCAB_SIZE].to(t_logits.dtype)
+                sc_emb = torch.empty(dB, dT, MODEL_DIM, device=t_logits.device, dtype=t_logits.dtype)
+                for i in range(0, dT, 128):
+                    j = min(i + 128, dT)
+                    sc_emb[:, i:j, :] = F.softmax(t_logits[:, i:j, :], dim=-1) @ embed_ct
+                del t_logits
                 dlogits = raw_model(masked, t_diag, mask=dmask, sc_emb=sc_emb)
                 dlogits_f = dlogits.reshape(-1, VOCAB_SIZE).float()
                 dtargets = diag_tokens.reshape(-1)
