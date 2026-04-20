@@ -422,9 +422,9 @@ class SplitOptimizer:
     def _make_hook(self, pname, is_block):
         """Forward pre-hook factory. Accumulates XᵀX into self.batch_ztz[pname]
         during student forward only (guarded by is_grad_enabled to skip
-        teacher sc fwd and eval). Matmul runs in the input dtype (bf16 under
-        autocast) for Tensor Core speed; result is upcast to fp32 for EMA
-        storage and Cholesky downstream."""
+        teacher sc fwd and eval). Matmul runs inside torch.no_grad() on a
+        detached X — otherwise the XᵀX node would stay in the autograd graph
+        and retain all upstream activations, causing OOM on DDP backward."""
         def hook(module, inputs):
             if not self._record_ztz or not torch.is_grad_enabled():
                 return
@@ -432,13 +432,15 @@ class SplitOptimizer:
             if X.dim() > 2:
                 X = X.reshape(-1, X.shape[-1])
             N = X.shape[0]
-            if is_block:
-                d = MODEL_DIM
-                n_blocks = X.shape[1] // d
-                ztz_list = [(X[:, i*d:(i+1)*d].t() @ X[:, i*d:(i+1)*d]).float()
-                            for i in range(n_blocks)]
-            else:
-                ztz_list = [(X.t() @ X).float()]
+            with torch.no_grad():
+                Xd = X.detach()
+                if is_block:
+                    d = MODEL_DIM
+                    n_blocks = Xd.shape[1] // d
+                    ztz_list = [(Xd[:, i*d:(i+1)*d].t() @ Xd[:, i*d:(i+1)*d]).float()
+                                for i in range(n_blocks)]
+                else:
+                    ztz_list = [(Xd.t() @ Xd).float()]
             if pname in self.batch_ztz:
                 for i, z in enumerate(ztz_list):
                     self.batch_ztz[pname][i].add_(z)
