@@ -85,6 +85,14 @@ SCALAR_LR = 0.02
 EMBED_LR = 0.03
 MUON_MOMENTUM = 0.95
 MUON_STEPS = 3
+# Newton-Muon (arXiv 2604.01472): right-precondition grad by (ZZᵀ)⁻¹ before NS.
+# Z = per-layer input activation matrix. K = EMA(ZZᵀ/N) tracked per Muon layer,
+# inverse refreshed every NMUON_REFRESH steps with trace-scaled Tikhonov ridge.
+NMUON_ENABLED = int(os.environ.get("NMUON", 1)) != 0
+NMUON_BETA = 0.9        # EMA decay for K
+NMUON_GAMMA = 0.2       # trace-scaled ridge coefficient
+NMUON_REFRESH = 16      # refresh K⁻¹ every N steps
+NMUON_K_INIT = 1e-3     # K init scale: K0 = NMUON_K_INIT · I
 GRAD_CLIP = 1.0
 LABEL_SMOOTHING = 0.1
 GRAD_ACCUM = int(os.environ.get("GRAD_ACCUM", 1))
@@ -351,7 +359,12 @@ def zeropower_newtonschulz5(g, steps=5, eps=1e-7):
 
 
 class SplitOptimizer:
-    """Muon for 2D weight matrices, Adam for embeddings/scalars."""
+    """Muon for 2D weight matrices, Adam for embeddings/scalars.
+
+    Optionally applies Newton-Muon right-preconditioning (arXiv 2604.01472)
+    to the Muon gradient: g ← g · K⁻¹ where K is the EMA of input-activation
+    second moment ZZᵀ/N per layer.
+    """
     def __init__(self, model):
         self.matrix_params = {}
         self.embed_params = {}
@@ -376,7 +389,135 @@ class SplitOptimizer:
             lr=SCALAR_LR, betas=(0.9, 0.95),
         )
 
+        # Newton-Muon preconditioner state.
+        # For layers with input dim > MODEL_DIM divisible by MODEL_DIM (MLP
+        # contraction), we use block-diagonal K: split input into MODEL_DIM
+        # chunks and track a separate K per chunk.
+        self.nmuon_enabled = NMUON_ENABLED
+        self.muon_modules = {}   # param_name → nn.Linear (module whose weight is that param)
+        self.ztz_ema = {}        # param_name → list[tensor(n,n)], fp32 EMA
+        self.ztz_inv = {}        # param_name → list[tensor(n,n)], fp32 cached inverse
+        self.batch_ztz = {}      # param_name → list[tensor(n,n)], per-step accumulator
+        self.batch_tokens = {}   # param_name → int (per-rank tokens this step)
+        self._record_ztz = True
+        self._hook_handles = []
+
+        if self.nmuon_enabled:
+            all_modules = dict(model.named_modules())
+            for pname in self.matrix_params:
+                mod_name = pname.rsplit(".", 1)[0]
+                mod = all_modules.get(mod_name)
+                if not isinstance(mod, nn.Linear):
+                    continue
+                self.muon_modules[pname] = mod
+                d_in = mod.weight.shape[1]
+                is_block = (d_in > MODEL_DIM and d_in % MODEL_DIM == 0)
+                h = mod.register_forward_pre_hook(self._make_hook(pname, is_block))
+                self._hook_handles.append(h)
+
         log(f"  Muon keys: {len(self.matrix_params)}, Embed keys: {len(self.embed_params)}, Scalar keys: {len(self.scalar_params)}")
+        if self.nmuon_enabled:
+            log(f"  Newton-Muon ON: β={NMUON_BETA}, γ={NMUON_GAMMA}, refresh={NMUON_REFRESH}, hooked {len(self.muon_modules)} modules")
+
+    def _make_hook(self, pname, is_block):
+        """Forward pre-hook factory. Accumulates XᵀX into self.batch_ztz[pname]
+        during student forward only (guarded by is_grad_enabled to skip
+        teacher sc fwd and eval). Matmul runs in the input dtype (bf16 under
+        autocast) for Tensor Core speed; result is upcast to fp32 for EMA
+        storage and Cholesky downstream."""
+        def hook(module, inputs):
+            if not self._record_ztz or not torch.is_grad_enabled():
+                return
+            X = inputs[0]
+            if X.dim() > 2:
+                X = X.reshape(-1, X.shape[-1])
+            N = X.shape[0]
+            if is_block:
+                d = MODEL_DIM
+                n_blocks = X.shape[1] // d
+                ztz_list = [(X[:, i*d:(i+1)*d].t() @ X[:, i*d:(i+1)*d]).float()
+                            for i in range(n_blocks)]
+            else:
+                ztz_list = [(X.t() @ X).float()]
+            if pname in self.batch_ztz:
+                for i, z in enumerate(ztz_list):
+                    self.batch_ztz[pname][i].add_(z)
+                self.batch_tokens[pname] += N
+            else:
+                self.batch_ztz[pname] = ztz_list
+                self.batch_tokens[pname] = N
+        return hook
+
+    def update_preconditioner(self, step_idx):
+        """Call after all backward passes for this step, before the Muon step.
+
+        1. Allreduce ZᵀZ across DDP ranks (so every rank applies the same K).
+        2. Update per-layer EMA: K ← β·K + (1-β) · (ZᵀZ / N_total).
+        3. Refresh cached K⁻¹ every NMUON_REFRESH steps (Cholesky-based).
+        """
+        if not self.nmuon_enabled or not self.batch_ztz:
+            return
+
+        # DDP sync: sum ZᵀZ and token counts across ranks, then compute the
+        # global per-rank-averaged ZᵀZ/N.
+        if IS_DDP:
+            for pname, ztz_list in self.batch_ztz.items():
+                for z in ztz_list:
+                    dist.all_reduce(z, op=dist.ReduceOp.SUM)
+            tok_tensor = torch.tensor(
+                [self.batch_tokens[pname] for pname in self.batch_ztz],
+                device=DEVICE, dtype=torch.float64,
+            )
+            dist.all_reduce(tok_tensor, op=dist.ReduceOp.SUM)
+            tokens_global = {pname: float(tok_tensor[i].item())
+                             for i, pname in enumerate(self.batch_ztz)}
+        else:
+            tokens_global = {p: float(n) for p, n in self.batch_tokens.items()}
+
+        for pname, ztz_list in self.batch_ztz.items():
+            n_tok = max(tokens_global[pname], 1.0)
+            if pname not in self.ztz_ema:
+                # Init K at NMUON_K_INIT · I per block
+                self.ztz_ema[pname] = [
+                    NMUON_K_INIT * torch.eye(z.shape[0], device=z.device, dtype=z.dtype)
+                    for z in ztz_list
+                ]
+            for i, z in enumerate(ztz_list):
+                avg = z / n_tok
+                self.ztz_ema[pname][i].mul_(NMUON_BETA).add_(avg, alpha=(1.0 - NMUON_BETA))
+
+        self.batch_ztz.clear()
+        self.batch_tokens.clear()
+
+        # Refresh inverse every NMUON_REFRESH steps (and at the very first call)
+        if step_idx % NMUON_REFRESH == 0 or not self.ztz_inv:
+            for pname, K_list in self.ztz_ema.items():
+                invs = []
+                for K in K_list:
+                    n = K.shape[0]
+                    ridge = NMUON_GAMMA * (K.diagonal().sum() / n)
+                    K_reg = K + ridge * torch.eye(n, device=K.device, dtype=K.dtype)
+                    try:
+                        L = torch.linalg.cholesky(K_reg)
+                        K_inv = torch.cholesky_inverse(L)
+                    except Exception:
+                        # Fallback to identity (skip preconditioning this step for this block)
+                        K_inv = torch.eye(n, device=K.device, dtype=K.dtype)
+                    invs.append(K_inv)
+                self.ztz_inv[pname] = invs
+
+    def precondition(self, pname, g):
+        """Right-multiply g by cached K⁻¹ for this layer. No-op if K⁻¹ not
+        yet computed for this layer (first step of training)."""
+        if not self.nmuon_enabled or pname not in self.ztz_inv:
+            return g
+        K_invs = self.ztz_inv[pname]
+        if len(K_invs) == 1:
+            return g @ K_invs[0]
+        # Block-diagonal: split g's input-dim columns into MODEL_DIM chunks
+        chunk = K_invs[0].shape[0]
+        parts = g.split(chunk, dim=1)
+        return torch.cat([p @ K_inv for p, K_inv in zip(parts, K_invs)], dim=1)
 
     def zero_grad(self):
         for p in self.matrix_params.values():
@@ -390,6 +531,8 @@ class SplitOptimizer:
             "muon_bufs": {k: v.cpu() for k, v in self.muon_bufs.items()},
             "adam_embed": self.adam_embed.state_dict(),
             "adam_scalar": self.adam_scalar.state_dict(),
+            # Newton-Muon: persist EMA (but not cached inverse; rebuilt on refresh)
+            "ztz_ema": {k: [z.cpu() for z in v] for k, v in self.ztz_ema.items()},
         }
 
     def load_state_dict(self, sd):
@@ -398,6 +541,11 @@ class SplitOptimizer:
                 self.muon_bufs[k] = v.to(DEVICE)
         self.adam_embed.load_state_dict(sd["adam_embed"])
         self.adam_scalar.load_state_dict(sd["adam_scalar"])
+        # Newton-Muon EMA restore (optional — checkpoints from pre-NMUon runs
+        # won't have this key, and will restart EMA from scratch next step)
+        for k, v in sd.get("ztz_ema", {}).items():
+            if k in self.matrix_params:
+                self.ztz_ema[k] = [z.to(DEVICE) for z in v]
 
 # ==============================================================================
 # CHECKPOINTING
@@ -716,6 +864,10 @@ def main():
             pg["lr"] = SCALAR_LR * lr_mul
         split_opt.adam_scalar.step()
 
+        # Newton-Muon: update per-layer K = EMA(ZZᵀ/N), refresh K⁻¹ on cadence.
+        # No-op if NMUON_ENABLED=False.
+        split_opt.update_preconditioner(step)
+
         # Muon step (manual, operates on raw_model params which DDP keeps in sync)
         with torch.no_grad():
             lr = MATRIX_LR * lr_mul
@@ -723,6 +875,10 @@ def main():
                 if p.grad is None:
                     continue
                 g = p.grad.float()
+                # Newton-Muon right-preconditioning: g ← g · K⁻¹ (paper Alg 1:
+                # "K⁻¹ applied to raw layer gradient, before momentum and the
+                # rest of the Muon pipeline").
+                g = split_opt.precondition(name, g)
                 buf = MUON_MOMENTUM * split_opt.muon_bufs[name] + g
                 split_opt.muon_bufs[name] = buf
                 g_eff = g + MUON_MOMENTUM * buf
