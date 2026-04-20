@@ -88,6 +88,7 @@ MUON_STEPS = 3
 GRAD_CLIP = 1.0
 LABEL_SMOOTHING = 0.1
 GRAD_ACCUM = int(os.environ.get("GRAD_ACCUM", 1))
+SC_CADENCE = 3  # 1-in-N training steps do a detached teacher fwd for mask-gated sc
 CHECKPOINT_EVERY = 50_000
 CHECKPOINT_DIR = Path(__file__).resolve().parent / "checkpoints_cuda"
 
@@ -304,12 +305,18 @@ class DiffusionLM(nn.Module):
         self.register_buffer("_rope_sin", rope_sin)
         self.t_embed = nn.Linear(1, dim, bias=True)
 
-    def forward(self, x_noised, t_value, mask=None):
+    def forward(self, x_noised, t_value, mask=None, sc_emb=None):
         B, T = x_noised.shape
         h = self.embed(x_noised)
         t_scalar = torch.tensor([[t_value]], device=x_noised.device, dtype=h.dtype)
         t_bias = self.t_embed(t_scalar)
         h = h + t_bias
+        if sc_emb is not None:
+            # Mask-gated self-conditioning (v2): sc contributes only at masked
+            # positions. v1 pollution at low-t unmasked positions killed the
+            # signal; gating removes that while preserving high-t help.
+            assert mask is not None, "sc_emb requires mask to gate"
+            h = h + sc_emb.to(h.dtype) * mask.unsqueeze(-1).to(h.dtype)
 
         rope_cos = self._rope_cos[:T]
         rope_sin = self._rope_sin[:T]
@@ -460,7 +467,16 @@ def diffusion_loss(model, tokens):
     mask = torch.rand(B, T, device=tokens.device) < mask_prob
     masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
 
-    logits = model(masked_tokens, t_val, mask=mask)
+    # Mask-gated partial self-conditioning (v2): 1-in-SC_CADENCE steps run a
+    # detached teacher fwd and feed sc_emb into the student, gated by mask.
+    use_sc = (_GLOBAL_STEP % SC_CADENCE == 0)
+    sc_emb = None
+    if use_sc:
+        with torch.no_grad():
+            t_logits = model(masked_tokens, t_val, mask=mask)
+            sc_emb = F.softmax(t_logits.float(), dim=-1) @ model.embed.weight[:VOCAB_SIZE].float()
+
+    logits = model(masked_tokens, t_val, mask=mask, sc_emb=sc_emb)
     logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
     targets_flat = tokens.reshape(-1)
 
@@ -501,7 +517,10 @@ def compute_elbo_bpb(model, val_loader, bytes_per_token, num_steps, num_batches)
             mask_prob = max(get_mask_prob(t_mid), 0.005)
             mask = torch.rand(B, T, device=tokens.device) < mask_prob
             masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
-            logits = model(masked_tokens, t_mid, mask=mask)
+            # Always-2-pass at eval: teacher → sc_emb → student.
+            t_logits = model(masked_tokens, t_mid, mask=mask)
+            sc_emb = F.softmax(t_logits.float(), dim=-1) @ model.embed.weight[:VOCAB_SIZE].float()
+            logits = model(masked_tokens, t_mid, mask=mask, sc_emb=sc_emb)
 
             logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
             targets_flat = tokens.reshape(-1)
@@ -621,11 +640,24 @@ def main():
                 mask = torch.rand(B, T, device=tokens.device) < mask_prob
                 masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
 
+                # Mask-gated partial self-conditioning (v2): 1-in-SC_CADENCE
+                # steps do a detached teacher fwd on raw_model (un-DDP-wrapped),
+                # project softmax(logits) through embed.weight to get sc_emb,
+                # then the student fwd gates sc_emb by mask so only masked
+                # positions see the sc perturbation.
+                use_sc = ((step * GRAD_ACCUM + accum_idx) % SC_CADENCE == 0)
+                sc_emb = None
+                if use_sc:
+                    with torch.no_grad():
+                        with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
+                            t_logits = raw_model(masked_tokens, t_val, mask=mask)
+                        sc_emb = F.softmax(t_logits.float(), dim=-1) @ raw_model.embed.weight[:VOCAB_SIZE].float()
+
                 # Skip DDP allreduce on intermediate accum steps
                 ctx = model.no_sync if (IS_DDP and accum_idx < GRAD_ACCUM - 1) else contextlib.nullcontext
                 with ctx():
                     with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
-                        logits = model(masked_tokens, t_val, mask=mask)
+                        logits = model(masked_tokens, t_val, mask=mask, sc_emb=sc_emb)
                         logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
                         targets_flat = tokens.reshape(-1)
                         per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none")
@@ -720,7 +752,10 @@ def main():
                 mp = get_mask_prob(t_diag)
                 dmask = torch.rand(diag_tokens.shape, device=diag_tokens.device) < mp
                 masked = torch.where(dmask, MASK_TOKEN_ID, diag_tokens)
-                dlogits = raw_model(masked, t_diag, mask=dmask)
+                # Always-2-pass at eval: teacher → sc_emb → student.
+                t_logits = raw_model(masked, t_diag, mask=dmask)
+                sc_emb = F.softmax(t_logits.float(), dim=-1) @ raw_model.embed.weight[:VOCAB_SIZE].float()
+                dlogits = raw_model(masked, t_diag, mask=dmask, sc_emb=sc_emb)
                 dlogits_f = dlogits.reshape(-1, VOCAB_SIZE).float()
                 dtargets = diag_tokens.reshape(-1)
                 dce = F.cross_entropy(dlogits_f, dtargets, reduction="none")
