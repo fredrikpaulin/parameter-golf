@@ -404,7 +404,7 @@ class SplitOptimizer:
 
         if self.nmuon_enabled:
             all_modules = dict(model.named_modules())
-            for pname in self.matrix_params:
+            for pname, p in self.matrix_params.items():
                 mod_name = pname.rsplit(".", 1)[0]
                 mod = all_modules.get(mod_name)
                 if not isinstance(mod, nn.Linear):
@@ -412,6 +412,21 @@ class SplitOptimizer:
                 self.muon_modules[pname] = mod
                 d_in = mod.weight.shape[1]
                 is_block = (d_in > MODEL_DIM and d_in % MODEL_DIM == 0)
+                # Pre-allocate batch_ztz buffers once; reuse across steps to
+                # avoid allocator churn (fresh 101 MB/step of fp32 fragmenting
+                # the arena with sc v2's 805 MB transient).
+                dev = p.device
+                if is_block:
+                    n_blocks = d_in // MODEL_DIM
+                    self.batch_ztz[pname] = [
+                        torch.zeros(MODEL_DIM, MODEL_DIM, device=dev, dtype=torch.float32)
+                        for _ in range(n_blocks)
+                    ]
+                else:
+                    self.batch_ztz[pname] = [
+                        torch.zeros(d_in, d_in, device=dev, dtype=torch.float32)
+                    ]
+                self.batch_tokens[pname] = 0
                 h = mod.register_forward_pre_hook(self._make_hook(pname, is_block))
                 self._hook_handles.append(h)
 
@@ -441,13 +456,11 @@ class SplitOptimizer:
                                 for i in range(n_blocks)]
                 else:
                     ztz_list = [(Xd.t() @ Xd).float()]
-            if pname in self.batch_ztz:
-                for i, z in enumerate(ztz_list):
-                    self.batch_ztz[pname][i].add_(z)
-                self.batch_tokens[pname] += N
-            else:
-                self.batch_ztz[pname] = ztz_list
-                self.batch_tokens[pname] = N
+            # Buffers pre-allocated in __init__; always in-place add to avoid
+            # allocator churn that fragments CUDA memory over long runs.
+            for i, z in enumerate(ztz_list):
+                self.batch_ztz[pname][i].add_(z)
+            self.batch_tokens[pname] += N
         return hook
 
     def update_preconditioner(self, step_idx):
@@ -488,8 +501,14 @@ class SplitOptimizer:
                 avg = z / n_tok
                 self.ztz_ema[pname][i].mul_(NMUON_BETA).add_(avg, alpha=(1.0 - NMUON_BETA))
 
-        self.batch_ztz.clear()
-        self.batch_tokens.clear()
+        # Zero buffers in-place — do NOT .clear() the dict; the tensors are
+        # pre-allocated once in __init__ and reused every step to prevent
+        # allocator fragmentation.
+        for ztz_list in self.batch_ztz.values():
+            for z in ztz_list:
+                z.zero_()
+        for pname in self.batch_tokens:
+            self.batch_tokens[pname] = 0
 
         # Refresh inverse every NMUON_REFRESH steps (and at the very first call)
         if step_idx % NMUON_REFRESH == 0 or not self.ztz_inv:
