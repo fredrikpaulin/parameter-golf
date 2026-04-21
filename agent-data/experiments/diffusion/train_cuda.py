@@ -276,9 +276,11 @@ class BidirectionalAttention(nn.Module):
         q = rms_norm(q)
         k = rms_norm(k)
 
-        attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(hd))
-        attn = F.softmax(attn, dim=-1).to(v.dtype)
-        out = (attn @ v).permute(0, 2, 1, 3).reshape(B, T, -1)
+        # SDPA uses the memory-efficient backend — avoids materializing the
+        # full (B, H, T, T) attention matrix. At T=512 this is a ~no-op;
+        # at T=1024 it's the difference between fitting in 16GB and OOMing.
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+        out = out.permute(0, 2, 1, 3).reshape(B, T, -1)
         return self.c_proj(out)
 
 
