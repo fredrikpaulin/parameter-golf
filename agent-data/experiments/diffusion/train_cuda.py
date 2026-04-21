@@ -88,7 +88,7 @@ MUON_STEPS = 3
 # Newton-Muon (arXiv 2604.01472): right-precondition grad by (ZZᵀ)⁻¹ before NS.
 # Z = per-layer input activation matrix. K = EMA(ZZᵀ/N) tracked per Muon layer,
 # inverse refreshed every NMUON_REFRESH steps with trace-scaled Tikhonov ridge.
-NMUON_ENABLED = int(os.environ.get("NMUON", 1)) != 0
+NMUON_ENABLED = int(os.environ.get("NMUON", 0)) != 0
 NMUON_BETA = 0.9        # EMA decay for K
 NMUON_GAMMA = 0.2       # trace-scaled ridge coefficient
 NMUON_REFRESH = 16      # refresh K⁻¹ every N steps
