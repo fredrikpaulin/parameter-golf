@@ -43,12 +43,14 @@ export TIME_BUDGET=${TIME_BUDGET:-8400}
 export VOCAB_SIZE=${VOCAB_SIZE:-8192}
 export BATCH_TOKENS=${BATCH_TOKENS:-16384}
 export GRAD_ACCUM=${GRAD_ACCUM:-16}
+export SEQ_LEN=${SEQ_LEN:-512}
 
 EFF_BATCH=$((BATCH_TOKENS * 2 * GRAD_ACCUM))
 
 echo "=== H100 proxy run ==="
 echo "  TIME_BUDGET   = ${TIME_BUDGET}s"
 echo "  VOCAB_SIZE    = ${VOCAB_SIZE}"
+echo "  SEQ_LEN       = ${SEQ_LEN}"
 echo "  BATCH_TOKENS  = ${BATCH_TOKENS} per GPU"
 echo "  GRAD_ACCUM    = ${GRAD_ACCUM}"
 echo "  WORLD_SIZE    = 2 (2x RTX 5080)"
