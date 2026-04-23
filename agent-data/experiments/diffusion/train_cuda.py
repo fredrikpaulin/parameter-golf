@@ -60,10 +60,10 @@ _VOCAB_SUFFIX = {1024: "sp1024", 4096: "sp4096", 8192: "sp8192"}
 _DATA_DIR = _VOCAB_SUFFIX.get(VOCAB_SIZE, f"sp{VOCAB_SIZE}")
 DATA_PATH = os.environ.get("DATA_PATH", str(REPO_ROOT / "data" / "datasets" / f"fineweb10B_{_DATA_DIR}"))
 TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", str(REPO_ROOT / "data" / "tokenizers" / f"fineweb_{VOCAB_SIZE}_bpe.model"))
-NUM_LAYERS = 6
+NUM_LAYERS = 8
 MODEL_DIM = 768
 NUM_HEADS = 12
-MLP_MULT = 4
+MLP_MULT = 3
 SEQ_LEN = int(os.environ.get("SEQ_LEN", 512))
 LOGIT_SOFTCAP = 30.0
 
