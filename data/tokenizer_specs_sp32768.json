@@ -1,0 +1,9 @@
+{
+  "tokenizers": [
+    {
+      "name": "sp_bpe_32768",
+      "dataset_suffix": "sp32768",
+      "vocab_size": 32768
+    }
+  ]
+}
