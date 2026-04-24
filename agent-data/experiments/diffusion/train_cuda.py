@@ -60,14 +60,14 @@ _VOCAB_SUFFIX = {1024: "sp1024", 4096: "sp4096", 8192: "sp8192"}
 _DATA_DIR = _VOCAB_SUFFIX.get(VOCAB_SIZE, f"sp{VOCAB_SIZE}")
 DATA_PATH = os.environ.get("DATA_PATH", str(REPO_ROOT / "data" / "datasets" / f"fineweb10B_{_DATA_DIR}"))
 TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", str(REPO_ROOT / "data" / "tokenizers" / f"fineweb_{VOCAB_SIZE}_bpe.model"))
-NUM_LAYERS = 8
+NUM_LAYERS = 6
 MODEL_DIM = 768
 NUM_HEADS = 12
 MLP_MULT = 3
 SEQ_LEN = int(os.environ.get("SEQ_LEN", 512))
 LOGIT_SOFTCAP = 30.0
 
-T_MIN = 0.1
+T_MIN = 0.15
 T_MAX = 0.6
 NOISE_SCHEDULE = "cosine"
 SIGMA_MIN = 1e-4
@@ -315,7 +315,11 @@ class DiffusionLM(nn.Module):
         self.register_buffer("_rope_sin", rope_sin)
         self.t_embed = nn.Linear(1, dim, bias=True)
 
-    def forward(self, x_noised, t_value, mask=None, sc_emb=None):
+    def forward_hidden(self, x_noised, t_value, mask=None, sc_emb=None):
+        """Trunk only: embed + t_bias + optional sc + blocks + final rms_norm.
+        Returns h (B, T, D). Does NOT apply out_head — this lets callers
+        project only at masked positions for the training loss and sc v2
+        teacher path (the unmasked logits aren't used for anything)."""
         B, T = x_noised.shape
         h = self.embed(x_noised)
         t_scalar = torch.tensor([[t_value]], device=x_noised.device, dtype=h.dtype)
@@ -334,11 +338,71 @@ class DiffusionLM(nn.Module):
         for block in self.blocks:
             h = block(h, rope_cos, rope_sin)
         h = rms_norm(h)
+        return h
 
+    def project_logits(self, h):
+        """Apply out_head + logit softcap to an arbitrary (*, D) tensor.
+        Used by forward() for the full (B, T, V) path and by masked_ce /
+        masked_sc_emb helpers for the (N_masked, V) path."""
         logits = self.out_head(h)
         if self.logit_softcap > 0:
             logits = self.logit_softcap * torch.tanh(logits / self.logit_softcap)
         return logits
+
+    def forward(self, x_noised, t_value, mask=None, sc_emb=None, return_hidden=False):
+        """Default: returns (B, T, V) logits. With return_hidden=True returns
+        the pre-out_head hidden states (B, T, D) — used by the training hot
+        path to do masked-only projection. Routing this through forward()
+        (rather than calling forward_hidden() directly) keeps DDP's
+        per-iteration bookkeeping (prepare_for_forward) intact when the
+        model is DDP-wrapped."""
+        h = self.forward_hidden(x_noised, t_value, mask=mask, sc_emb=sc_emb)
+        if return_hidden:
+            return h
+        return self.project_logits(h)
+
+
+def _masked_indices(mask):
+    """Return linear indices of masked positions in (B*T,) flat layout."""
+    return mask.reshape(-1).nonzero(as_tuple=False).squeeze(1)
+
+
+def masked_ce_loss(model, h, tokens, mask):
+    """Cross-entropy averaged over masked positions only. `model` is the
+    underlying DiffusionLM (not the DDP wrapper) so project_logits is
+    directly callable. Equivalent math to:
+        logits = project_logits(h); full CE; mask-weighted mean
+    but skips the out_head + softcap + CE work on unmasked rows.
+    Returns mean CE over masked positions (scalar)."""
+    B, T, D = h.shape
+    idx = _masked_indices(mask)
+    if idx.numel() == 0:
+        return h.sum() * 0.0  # stay in autograd graph, return zero
+    h_m = h.reshape(-1, D).index_select(0, idx)
+    y_m = tokens.reshape(-1).index_select(0, idx)
+    logits_m = model.project_logits(h_m).float()
+    return F.cross_entropy(logits_m, y_m, reduction="mean")
+
+
+def masked_sc_emb(model, h, mask):
+    """Build sc_emb = softmax(project_logits(h)) @ embed.weight[:V] at
+    masked positions only, scatter into a (B, T, D) tensor with zeros
+    elsewhere. Unmasked positions are ignored by the student's mask
+    gate anyway, so we skip computing them.
+
+    Called under torch.no_grad() + autocast by callers."""
+    B, T, D = h.shape
+    idx = _masked_indices(mask)
+    sc_emb = torch.zeros(B * T, D, device=h.device, dtype=h.dtype)
+    if idx.numel() == 0:
+        return sc_emb.view(B, T, D)
+    h_m = h.reshape(-1, D).index_select(0, idx)
+    logits_m = model.project_logits(h_m)
+    embed_ct = model.embed.weight[:VOCAB_SIZE].to(logits_m.dtype)
+    sc_m = F.softmax(logits_m, dim=-1) @ embed_ct
+    sc_emb.index_copy_(0, idx, sc_m.to(sc_emb.dtype))
+    return sc_emb.view(B, T, D)
+
 
 # ==============================================================================
 # MUON OPTIMIZER
@@ -639,29 +703,18 @@ def diffusion_loss(model, tokens):
     masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
 
     # Mask-gated partial self-conditioning (v2): 1-in-SC_CADENCE steps run a
-    # detached teacher fwd and feed sc_emb into the student, gated by mask.
+    # detached teacher fwd (hidden-only; project only at masked positions).
     use_sc = (_GLOBAL_STEP % SC_CADENCE == 0)
     sc_emb = None
     if use_sc:
         with torch.no_grad():
-            t_logits = model(masked_tokens, t_val, mask=mask)
-            # Chunked bf16 softmax @ embed — avoids a (B, T, V) fp32 allocation
-            # that OOMs at SP16384. bf16 is fine: sc_emb is a weak input
-            # perturbation, not a gradient path.
-            embed_ct = model.embed.weight[:VOCAB_SIZE].to(t_logits.dtype)
-            sc_emb = torch.empty(B, T, MODEL_DIM, device=t_logits.device, dtype=t_logits.dtype)
-            for i in range(0, T, 128):
-                j = min(i + 128, T)
-                sc_emb[:, i:j, :] = F.softmax(t_logits[:, i:j, :], dim=-1) @ embed_ct
-            del t_logits
+            h_t = model.forward_hidden(masked_tokens, t_val, mask=mask)
+            sc_emb = masked_sc_emb(model, h_t, mask)
+            del h_t
 
-    logits = model(masked_tokens, t_val, mask=mask, sc_emb=sc_emb)
-    logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
-    targets_flat = tokens.reshape(-1)
-
-    per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none")
-    mask_flat = mask.reshape(-1).float()
-    avg_ce = (per_tok * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
+    # Student: hidden → masked-only CE (skips out_head+softcap+CE on unmasked)
+    h = model.forward_hidden(masked_tokens, t_val, mask=mask, sc_emb=sc_emb)
+    avg_ce = masked_ce_loss(model, h, tokens, mask)
     return avg_ce / mask_prob
 
 # ==============================================================================
@@ -696,25 +749,20 @@ def compute_elbo_bpb(model, val_loader, bytes_per_token, num_steps, num_batches)
             mask_prob = max(get_mask_prob(t_mid), 0.005)
             mask = torch.rand(B, T, device=tokens.device) < mask_prob
             masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
-            # Always-2-pass at eval: teacher → sc_emb → student.
-            # Chunked bf16 softmax @ embed (matches training path).
-            t_logits = model(masked_tokens, t_mid, mask=mask)
-            embed_ct = model.embed.weight[:VOCAB_SIZE].to(t_logits.dtype)
-            sc_emb = torch.empty(B, T, MODEL_DIM, device=t_logits.device, dtype=t_logits.dtype)
-            for i in range(0, T, 128):
-                j = min(i + 128, T)
-                sc_emb[:, i:j, :] = F.softmax(t_logits[:, i:j, :], dim=-1) @ embed_ct
-            del t_logits
-            logits = model(masked_tokens, t_mid, mask=mask, sc_emb=sc_emb)
-
-            logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
-            targets_flat = tokens.reshape(-1)
-            per_token_nll = F.cross_entropy(logits_flat, targets_flat, reduction="none")
-            mask_flat = mask.reshape(-1).float()
-
-            n_masked = mask_flat.sum().item()
+            # Always-2-pass at eval: teacher → sc_emb (masked-only) → student.
+            h_t = model.forward_hidden(masked_tokens, t_mid, mask=mask)
+            sc_emb = masked_sc_emb(model, h_t, mask)
+            del h_t
+            # Student: masked-only CE
+            h = model.forward_hidden(masked_tokens, t_mid, mask=mask, sc_emb=sc_emb)
+            idx = _masked_indices(mask)
+            n_masked = int(idx.numel())
             if n_masked > 0:
-                avg_masked_nll = (per_token_nll * mask_flat).sum().item() / n_masked
+                h_m = h.reshape(-1, MODEL_DIM).index_select(0, idx)
+                y_m = tokens.reshape(-1).index_select(0, idx)
+                logits_m = model.project_logits(h_m).float()
+                per_token_nll_m = F.cross_entropy(logits_m, y_m, reduction="none")
+                avg_masked_nll = per_token_nll_m.mean().item()
             else:
                 avg_masked_nll = 0.0
 
@@ -826,37 +874,29 @@ def main():
                 masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
 
                 # Mask-gated partial self-conditioning (v2): 1-in-SC_CADENCE
-                # steps do a detached teacher fwd on raw_model (un-DDP-wrapped),
-                # project softmax(logits) through embed.weight to get sc_emb,
-                # then the student fwd gates sc_emb by mask so only masked
-                # positions see the sc perturbation.
+                # steps do a detached teacher fwd (hidden-only; project +
+                # softmax+embed only at masked positions — unmasked sc_emb
+                # is zeroed by mask gate anyway, so we skip computing it).
                 use_sc = ((step * GRAD_ACCUM + accum_idx) % SC_CADENCE == 0)
                 sc_emb = None
                 if use_sc:
                     with torch.no_grad():
                         with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
-                            t_logits = raw_model(masked_tokens, t_val, mask=mask)
-                        # Chunked bf16 softmax @ embed — avoids a (B, T, V) fp32
-                        # allocation that OOMs the 16GB 5080 at SP16384. bf16 is
-                        # fine here: sc_emb is a weak input perturbation, not a
-                        # gradient path.
-                        embed_ct = raw_model.embed.weight[:VOCAB_SIZE].to(t_logits.dtype)
-                        sc_emb = torch.empty(B, T, MODEL_DIM, device=t_logits.device, dtype=t_logits.dtype)
-                        for i in range(0, T, 128):
-                            j = min(i + 128, T)
-                            sc_emb[:, i:j, :] = F.softmax(t_logits[:, i:j, :], dim=-1) @ embed_ct
-                        del t_logits
+                            h_t = raw_model.forward_hidden(masked_tokens, t_val, mask=mask)
+                            sc_emb = masked_sc_emb(raw_model, h_t, mask)
+                        del h_t
 
                 # Skip DDP allreduce on intermediate accum steps
                 ctx = model.no_sync if (IS_DDP and accum_idx < GRAD_ACCUM - 1) else contextlib.nullcontext
                 with ctx():
                     with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
-                        logits = model(masked_tokens, t_val, mask=mask, sc_emb=sc_emb)
-                        logits_flat = logits.reshape(-1, VOCAB_SIZE).float()
-                        targets_flat = tokens.reshape(-1)
-                        per_tok = F.cross_entropy(logits_flat, targets_flat, reduction="none")
-                        mask_flat = mask.reshape(-1).float()
-                        avg_ce = (per_tok * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
+                        # Student: trunk through DDP.forward (preserves DDP's
+                        # prepare_for_forward bookkeeping), then masked-only
+                        # project+CE via raw_model. DDP allreduce hooks are
+                        # on parameters, so both trunk and out_head grads
+                        # sync correctly on backward.
+                        h = model(masked_tokens, t_val, mask=mask, sc_emb=sc_emb, return_hidden=True)
+                        avg_ce = masked_ce_loss(raw_model, h, tokens, mask)
                         loss_val = avg_ce / mask_prob / GRAD_ACCUM
                     loss_val.backward()
             else:
@@ -954,25 +994,22 @@ def main():
                 mp = get_mask_prob(t_diag)
                 dmask = torch.rand(diag_tokens.shape, device=diag_tokens.device) < mp
                 masked = torch.where(dmask, MASK_TOKEN_ID, diag_tokens)
-                # Always-2-pass at eval: teacher → sc_emb → student.
-                # Chunked bf16 softmax @ embed (matches training path).
-                t_logits = raw_model(masked, t_diag, mask=dmask)
-                dB, dT = masked.shape
-                embed_ct = raw_model.embed.weight[:VOCAB_SIZE].to(t_logits.dtype)
-                sc_emb = torch.empty(dB, dT, MODEL_DIM, device=t_logits.device, dtype=t_logits.dtype)
-                for i in range(0, dT, 128):
-                    j = min(i + 128, dT)
-                    sc_emb[:, i:j, :] = F.softmax(t_logits[:, i:j, :], dim=-1) @ embed_ct
-                del t_logits
-                dlogits = raw_model(masked, t_diag, mask=dmask, sc_emb=sc_emb)
-                dlogits_f = dlogits.reshape(-1, VOCAB_SIZE).float()
-                dtargets = diag_tokens.reshape(-1)
-                dce = F.cross_entropy(dlogits_f, dtargets, reduction="none")
-                dmask_f = dmask.reshape(-1).float()
-                n_m = dmask_f.sum().item()
-                avg_ce = (dce * dmask_f).sum().item() / n_m if n_m > 0 else 0.0
+                # Always-2-pass at eval: teacher → sc_emb (masked-only) → student.
+                h_t = raw_model.forward_hidden(masked, t_diag, mask=dmask)
+                sc_emb = masked_sc_emb(raw_model, h_t, dmask)
+                del h_t
+                h = raw_model.forward_hidden(masked, t_diag, mask=dmask, sc_emb=sc_emb)
+                idx = _masked_indices(dmask)
+                n_m = int(idx.numel())
+                if n_m > 0:
+                    h_m = h.reshape(-1, MODEL_DIM).index_select(0, idx)
+                    y_m = diag_tokens.reshape(-1).index_select(0, idx)
+                    dlogits_m = raw_model.project_logits(h_m).float()
+                    avg_ce = F.cross_entropy(dlogits_m, y_m, reduction="mean").item()
+                else:
+                    avg_ce = 0.0
                 per_t_ces[t_diag] = avg_ce
-                print(f"  t={t_diag:.2f}: mask_prob={mp:.3f}, n_masked={int(n_m)}, avg_CE_masked={avg_ce:.4f}")
+                print(f"  t={t_diag:.2f}: mask_prob={mp:.3f}, n_masked={n_m}, avg_CE_masked={avg_ce:.4f}")
 
         print(f"\nELBO eval ({EVAL_ELBO_STEPS} levels x 8 batches)...")
         val_loader.reset()
