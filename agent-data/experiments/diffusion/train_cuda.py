@@ -370,19 +370,39 @@ class DiffusionLM(nn.Module):
 
 
 def _masked_indices(mask):
-    """Return linear indices of masked positions in (B*T,) flat layout."""
+    """Return linear indices of masked positions in (B*T,) flat layout.
+
+    LEGACY PATH: uses `nonzero()` which is a host-device sync (dynamic
+    output size). The hot training path now passes `idx` directly from
+    sample_fixed_k_idx to skip this sync. Eval paths still use this
+    since they're outside the timed window."""
     return mask.reshape(-1).nonzero(as_tuple=False).squeeze(1)
 
 
-def masked_ce_loss(model, h, tokens, mask):
+def sample_fixed_k_idx(N, K, device):
+    """Fixed-cardinality random indices into a flat (B*T,) layout.
+    `K` is a Python int known on CPU, so slicing `randperm(N)[:K]`
+    produces a fixed output shape without host-device sync.
+
+    Replaces the Bernoulli `mask = rand < p` pattern where `mask.nonzero()`
+    would require a sync to learn the count. Sampling variance is
+    reduced (count is exact K, not Binomial(N, p)), but mean is
+    identical so ELBO unbiasedness is preserved."""
+    return torch.randperm(N, device=device)[:K]
+
+
+def masked_ce_loss(model, h, tokens, mask=None, idx=None):
     """Cross-entropy averaged over masked positions only. `model` is the
     underlying DiffusionLM (not the DDP wrapper) so project_logits is
     directly callable. Equivalent math to:
         logits = project_logits(h); full CE; mask-weighted mean
     but skips the out_head + softcap + CE work on unmasked rows.
-    Returns mean CE over masked positions (scalar)."""
+
+    Pass EITHER `mask` (legacy, requires nonzero sync) or `idx` (fast,
+    already-flat indices into B*T). Returns mean CE over masked positions."""
     B, T, D = h.shape
-    idx = _masked_indices(mask)
+    if idx is None:
+        idx = _masked_indices(mask)
     if idx.numel() == 0:
         return h.sum() * 0.0  # stay in autograd graph, return zero
     h_m = h.reshape(-1, D).index_select(0, idx)
@@ -391,15 +411,17 @@ def masked_ce_loss(model, h, tokens, mask):
     return F.cross_entropy(logits_m, y_m, reduction="mean")
 
 
-def masked_sc_emb(model, h, mask):
+def masked_sc_emb(model, h, mask=None, idx=None):
     """Build sc_emb = softmax(project_logits(h)) @ embed.weight[:V] at
     masked positions only, scatter into a (B, T, D) tensor with zeros
     elsewhere. Unmasked positions are ignored by the student's mask
     gate anyway, so we skip computing them.
 
+    Pass EITHER `mask` (legacy, requires nonzero sync) or `idx` (fast).
     Called under torch.no_grad() + autocast by callers."""
     B, T, D = h.shape
-    idx = _masked_indices(mask)
+    if idx is None:
+        idx = _masked_indices(mask)
     sc_emb = torch.zeros(B * T, D, device=h.device, dtype=h.dtype)
     if idx.numel() == 0:
         return sc_emb.view(B, T, D)
@@ -706,7 +728,13 @@ def diffusion_loss(model, tokens):
     t_val = alpha_to_t(alpha_val)
     mask_prob = max(alpha_val, 0.01)
 
-    mask = torch.rand(B, T, device=tokens.device) < mask_prob
+    # Fixed-K masked indices (no nonzero sync)
+    N = B * T
+    K = max(1, min(int(round(mask_prob * N)), N))
+    idx = sample_fixed_k_idx(N, K, tokens.device)
+    mask_flat = torch.zeros(N, dtype=torch.bool, device=tokens.device)
+    mask_flat[idx] = True
+    mask = mask_flat.view(B, T)
     masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
 
     # Mask-gated partial self-conditioning (v2): 1-in-SC_CADENCE steps run a
@@ -716,12 +744,12 @@ def diffusion_loss(model, tokens):
     if use_sc:
         with torch.no_grad():
             h_t = model.forward_hidden(masked_tokens, t_val, mask=mask)
-            sc_emb = masked_sc_emb(model, h_t, mask)
+            sc_emb = masked_sc_emb(model, h_t, idx=idx)
             del h_t
 
     # Student: hidden → masked-only CE (skips out_head+softcap+CE on unmasked)
     h = model.forward_hidden(masked_tokens, t_val, mask=mask, sc_emb=sc_emb)
-    avg_ce = masked_ce_loss(model, h, tokens, mask)
+    avg_ce = masked_ce_loss(model, h, tokens, idx=idx)
     return avg_ce / mask_prob
 
 # ==============================================================================
@@ -888,7 +916,19 @@ def main():
                 mask_prob = max(alpha_val, 0.01)
 
                 B, T = tokens.shape
-                mask = torch.rand(B, T, device=tokens.device) < mask_prob
+                # Fixed-K masked indices: generate idx via randperm(N)[:K],
+                # then scatter to bool mask for the student forward's
+                # mask-gated sc injection. This avoids `mask.nonzero()`'s
+                # host-device sync (dynamic output size) on every microbatch.
+                # K is chosen so E[K] = mask_prob*N (same mean as Bernoulli,
+                # zero variance in count).
+                N = B * T
+                K = int(round(mask_prob * N))
+                K = max(1, min(K, N))
+                idx = sample_fixed_k_idx(N, K, tokens.device)
+                mask_flat = torch.zeros(N, dtype=torch.bool, device=tokens.device)
+                mask_flat[idx] = True
+                mask = mask_flat.view(B, T)
                 masked_tokens = torch.where(mask, MASK_TOKEN_ID, tokens)
 
                 # Mask-gated partial self-conditioning (v2): 1-in-SC_CADENCE
@@ -901,7 +941,8 @@ def main():
                     with torch.no_grad():
                         with torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
                             h_t = raw_model.forward_hidden(masked_tokens, t_val, mask=mask)
-                            sc_emb = masked_sc_emb(raw_model, h_t, mask)
+                            # Pass idx directly — skips the nonzero() sync.
+                            sc_emb = masked_sc_emb(raw_model, h_t, idx=idx)
                         del h_t
 
                 # Skip DDP allreduce on intermediate accum steps
@@ -914,7 +955,8 @@ def main():
                         # on parameters, so both trunk and out_head grads
                         # sync correctly on backward.
                         h = model(masked_tokens, t_val, mask=mask, sc_emb=sc_emb, return_hidden=True)
-                        avg_ce = masked_ce_loss(raw_model, h, tokens, mask)
+                        # Pass idx directly — skips the nonzero() sync.
+                        avg_ce = masked_ce_loss(raw_model, h, tokens, idx=idx)
                         loss_val = avg_ce / mask_prob / GRAD_ACCUM
                     loss_val.backward()
             else:
