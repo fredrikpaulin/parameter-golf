@@ -26,6 +26,7 @@ import glob
 import json
 import math
 import os
+import random
 import time
 from pathlib import Path
 
@@ -241,10 +242,13 @@ def _build_rope_freqs(seq_len, head_dim, base=10000.0):
 
 
 def _apply_rope(x, cos_vals, sin_vals):
-    """x: (B, heads, T, hd)"""
+    """x: (B, heads, T, hd). Cast cos/sin to x.dtype so the multiplies stay
+    in bf16 under autocast — otherwise fp32 cos/sin would promote Q/K to
+    fp32, doubling memory bandwidth and potentially forcing a slower
+    SDPA backend."""
     T = x.shape[2]
-    cos_v = cos_vals[:T].to(x.device)
-    sin_v = sin_vals[:T].to(x.device)
+    cos_v = cos_vals[:T].to(device=x.device, dtype=x.dtype)
+    sin_v = sin_vals[:T].to(device=x.device, dtype=x.dtype)
     x1 = x[..., ::2]
     x2 = x[..., 1::2]
     o1 = x1 * cos_v - x2 * sin_v
@@ -322,8 +326,11 @@ class DiffusionLM(nn.Module):
         teacher path (the unmasked logits aren't used for anything)."""
         B, T = x_noised.shape
         h = self.embed(x_noised)
-        t_scalar = torch.tensor([[t_value]], device=x_noised.device, dtype=h.dtype)
-        t_bias = self.t_embed(t_scalar)
+        # Inline t_bias: equivalent to t_embed(tensor([[t_value]])) but skips
+        # the 1×1 tensor allocation and tiny (1×1→D) Linear dispatch.
+        # t_embed.weight is (D, 1), t_embed.bias is (D,); so
+        # t_embed(tensor([[t_value]])) = t_value * weight[:, 0] + bias.
+        t_bias = (self.t_embed.weight[:, 0] * t_value + self.t_embed.bias).to(h.dtype)
         h = h + t_bias
         if sc_emb is not None:
             # Mask-gated self-conditioning (v2): sc contributes only at masked
@@ -839,7 +846,17 @@ def main():
 
     # Wrap with DDP after checkpoint load
     if IS_DDP:
-        model = torch.nn.parallel.DistributedDataParallel(raw_model, device_ids=[LOCAL_RANK])
+        model = torch.nn.parallel.DistributedDataParallel(
+            raw_model,
+            device_ids=[LOCAL_RANK],
+            # RoPE buffers are deterministic at init, no mutable buffers;
+            # skip per-forward buffer broadcast.
+            broadcast_buffers=False,
+            # Avoid copying grads into allreduce buckets on every step;
+            # requires that we never call .detach_() on p.grad. Our Muon
+            # zeroing uses .zero_() which is compatible.
+            gradient_as_bucket_view=True,
+        )
     else:
         model = raw_model
 
@@ -856,16 +873,17 @@ def main():
 
             # All ranks must use the same t_val for DDP gradient sync
             if IS_DDP:
-                # Alpha-uniform stratified sampling (see diffusion_loss for rationale)
+                # Alpha-uniform stratified sampling (see diffusion_loss for rationale).
+                # CPU-side deterministic alpha: shared across ranks without a
+                # per-microbatch NCCL broadcast or GPU→CPU .item() sync. Each
+                # (step, accum_idx) gets a deterministic seed so all ranks
+                # produce identical alpha without communication.
                 stratum = (step * GRAD_ACCUM + accum_idx) % _N_STRATA
                 stride = (_ALPHA_MAX - _ALPHA_MIN) / _N_STRATA
                 a_lo = _ALPHA_MIN + stratum * stride
                 a_hi = a_lo + stride
-                a_tensor = torch.empty(1, device=DEVICE)
-                if IS_MASTER:
-                    a_tensor.uniform_(a_lo, a_hi)
-                dist.broadcast(a_tensor, src=0)
-                alpha_val = float(a_tensor.item())
+                _seed = 0xC0FFEE + step * GRAD_ACCUM + accum_idx
+                alpha_val = a_lo + (a_hi - a_lo) * random.Random(_seed).random()
                 t_val = alpha_to_t(alpha_val)
                 mask_prob = max(alpha_val, 0.01)
 
@@ -942,8 +960,11 @@ def main():
                 # "K⁻¹ applied to raw layer gradient, before momentum and the
                 # rest of the Muon pipeline").
                 g = split_opt.precondition(name, g)
-                buf = MUON_MOMENTUM * split_opt.muon_bufs[name] + g
-                split_opt.muon_bufs[name] = buf
+                # In-place buffer update: avoids replacing the buffer tensor
+                # each step (which fragments the allocator over long runs and
+                # breaks gradient_as_bucket_view's view invariants).
+                buf = split_opt.muon_bufs[name]
+                buf.mul_(MUON_MOMENTUM).add_(g)
                 g_eff = g + MUON_MOMENTUM * buf
                 g_ortho = zeropower_newtonschulz5(g_eff, MUON_STEPS)
                 scale = math.sqrt(max(1.0, p.shape[0] / p.shape[1]))
