@@ -81,7 +81,7 @@ WARMUP_STEPS = 50
 WARMDOWN_FRAC = 0.15
 MAX_ITERATIONS = 1_000_000
 VAL_BATCH_TOKENS = 4096
-MATRIX_LR = 0.025
+MATRIX_LR = 0.02
 SCALAR_LR = 0.02
 EMBED_LR = 0.03
 MUON_MOMENTUM = 0.95
@@ -97,7 +97,7 @@ NMUON_K_INIT = 1e-3     # K init scale: K0 = NMUON_K_INIT · I
 GRAD_CLIP = 1.0
 LABEL_SMOOTHING = 0.1
 GRAD_ACCUM = int(os.environ.get("GRAD_ACCUM", 1))
-SC_CADENCE = 3  # 1-in-N training steps do a detached teacher fwd for mask-gated sc
+SC_CADENCE = 2  # 1-in-N training steps do a detached teacher fwd for mask-gated sc
 CHECKPOINT_EVERY = 50_000
 CHECKPOINT_DIR = Path(__file__).resolve().parent / "checkpoints_cuda"
 
