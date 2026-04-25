@@ -69,7 +69,7 @@ SEQ_LEN = int(os.environ.get("SEQ_LEN", 512))
 LOGIT_SOFTCAP = 30.0
 
 T_MIN = 0.35
-T_MAX = 0.55
+T_MAX = 0.50
 NOISE_SCHEDULE = "cosine"
 SIGMA_MIN = 1e-4
 SIGMA_MAX = 20.0
