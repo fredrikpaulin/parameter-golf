@@ -84,7 +84,7 @@ VAL_BATCH_TOKENS = 4096
 MATRIX_LR = 0.02
 SCALAR_LR = 0.02
 EMBED_LR = 0.03
-MUON_MOMENTUM = 0.97
+MUON_MOMENTUM = 0.95
 MUON_STEPS = 3
 # Newton-Muon (arXiv 2604.01472): right-precondition grad by (ZZᵀ)⁻¹ before NS.
 # Z = per-layer input activation matrix. K = EMA(ZZᵀ/N) tracked per Muon layer,
@@ -708,7 +708,7 @@ def load_checkpoint(model, opt, train_loader):
 # TRAINING LOSS
 # ==============================================================================
 
-_N_STRATA = 8
+_N_STRATA = 16
 _GLOBAL_STEP = 0
 _ALPHA_MIN = get_mask_prob(T_MIN)
 _ALPHA_MAX = get_mask_prob(T_MAX)
