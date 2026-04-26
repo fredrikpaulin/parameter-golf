@@ -78,13 +78,13 @@ EVAL_ELBO_STEPS = 64
 # Per-GPU batch size. Effective batch = TRAIN_BATCH_TOKENS * WORLD_SIZE
 TRAIN_BATCH_TOKENS = int(os.environ.get("BATCH_TOKENS", 24576))
 WARMUP_STEPS = 50
-WARMDOWN_FRAC = 0.25
+WARMDOWN_FRAC = 0.20
 MAX_ITERATIONS = 1_000_000
 VAL_BATCH_TOKENS = 4096
 MATRIX_LR = 0.02
 SCALAR_LR = 0.02
 EMBED_LR = 0.03
-MUON_MOMENTUM = 0.95
+MUON_MOMENTUM = 0.97
 MUON_STEPS = 3
 # Newton-Muon (arXiv 2604.01472): right-precondition grad by (ZZᵀ)⁻¹ before NS.
 # Z = per-layer input activation matrix. K = EMA(ZZᵀ/N) tracked per Muon layer,
