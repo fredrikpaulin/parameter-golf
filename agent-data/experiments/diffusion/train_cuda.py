@@ -708,7 +708,7 @@ def load_checkpoint(model, opt, train_loader):
 # TRAINING LOSS
 # ==============================================================================
 
-_N_STRATA = 16
+_N_STRATA = 8
 _GLOBAL_STEP = 0
 _ALPHA_MIN = get_mask_prob(T_MIN)
 _ALPHA_MAX = get_mask_prob(T_MAX)
