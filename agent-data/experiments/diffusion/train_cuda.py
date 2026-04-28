@@ -85,7 +85,7 @@ MATRIX_LR = 0.02
 SCALAR_LR = 0.02
 EMBED_LR = 0.03
 MUON_MOMENTUM = 0.95
-MUON_STEPS = 5
+MUON_STEPS = 7
 # Newton-Muon (arXiv 2604.01472): right-precondition grad by (ZZᵀ)⁻¹ before NS.
 # Z = per-layer input activation matrix. K = EMA(ZZᵀ/N) tracked per Muon layer,
 # inverse refreshed every NMUON_REFRESH steps with trace-scaled Tikhonov ridge.
